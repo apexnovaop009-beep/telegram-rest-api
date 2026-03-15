@@ -1,11 +1,12 @@
 import "dotenv/config";
 import { Application } from "./app";
-import { ApiKeyMiddleware } from "./http/middleware/ApiKeyMiddleware";
+import { TenantAuthMiddleware } from "./http/middleware/TenantAuthMiddleware";
 import { AuthRoute } from "./routes/auth/AuthRoute";
 import { UserRoute } from "./routes/user/UserRoute";
 import { MessageRoute } from "./routes/message/MessageRoute";
 import { ChatRoute } from "./routes/message/ChatRoute";
 import { ChannelRoute } from "./routes/channels/ChannelRoute";
+import { ServerRoute } from "./routes/servers/ServerRoute";
 import { TelegramClientService } from "./telegram/TelegramClientService";
 import { TelegramSessionWatchdog } from "./telegram/TelegramSessionWatchdog";
 
@@ -19,7 +20,10 @@ async function bootstrap(): Promise<void> {
 
 	const app = new Application();
 	app
-		.registerMiddleware(new ApiKeyMiddleware())
+		.registerPublicRoutes([
+			new ServerRoute(), // /health, /server/CreateTenant, /server/GetStatistics
+		])
+		.registerMiddleware(new TenantAuthMiddleware())
 		.registerRoutes([
 			new AuthRoute(),
 			new UserRoute(),

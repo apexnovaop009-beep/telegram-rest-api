@@ -256,16 +256,10 @@ export class AuthRoute extends BaseRoute {
 				}
 
 				try {
-					// withTelegramSession handles unauthorized invalidation and
-					// temporary client cleanup automatically via its catch/finally.
-					const result = await this.withTelegramSession(sessionId, (client) =>
-						client.getClient().invoke(new Api.auth.LogOut({})),
-					);
-
 					// Explicit invalidate on success: removes from pool and deletes DB record.
 					await TelegramClientService.invalidate(sessionId);
 
-					new SuccessResponse([result], "Logged out successfully").send(reply);
+					new SuccessResponse([], "Logged out successfully").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}

@@ -87,7 +87,7 @@ export class TelegramSessionWatchdog {
 	 * Scenario 1: Pool contains a session whose user has logged out.
 	 *
 	 * Iterates every pooled session and calls `isUserAuthorized()`.
-	 * Any session that fails the check is evicted from the pool and
+	 * Any session that fails the check is invalidated from the pool and
 	 * its database record is marked as revoked.
 	 */
 	private async evictLoggedOutSessions(): Promise<void> {
@@ -101,7 +101,7 @@ export class TelegramSessionWatchdog {
 				const authorized = await client.getClient().isUserAuthorized();
 
 				if (!authorized) {
-					await TelegramClientService.evict(sessionId);
+					await TelegramClientService.invalidate(sessionId);
 					console.log(
 						`[Watchdog] Session "${sessionId}" is no longer authorized — Terminated`,
 					);

@@ -6,7 +6,7 @@ export abstract class BaseMiddleware {
 	abstract handle(request: FastifyRequest, reply: FastifyReply): Promise<void>;
 }
 
-export class ApiKeyMiddleware extends BaseMiddleware {
+export class TenantAuthMiddleware extends BaseMiddleware {
 	handle = async (
 		request: FastifyRequest,
 		reply: FastifyReply,

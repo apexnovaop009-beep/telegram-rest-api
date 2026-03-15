@@ -5,11 +5,12 @@ import Fastify, {
 	FastifyRequest,
 } from "fastify";
 import { BaseRoute } from "./routes/BaseRoute";
-import { ApiKeyMiddleware } from "./http/middleware/ApiKeyMiddleware";
+import { TenantAuthMiddleware } from "./http/middleware/TenantAuthMiddleware";
 import { ErrorResponse } from "./http/ApiResponse";
 
 export class Application {
 	private readonly server: FastifyInstance;
+	private authMiddleware: TenantAuthMiddleware | null = null;
 
 	constructor() {
 		this.server = Fastify({ logger: true });
@@ -33,17 +34,44 @@ export class Application {
 		);
 	}
 
-	registerMiddleware(middleware: ApiKeyMiddleware): this {
-		this.server.addHook("onRequest", middleware.handle);
+	/**
+	 * Stores the auth middleware to be applied to authenticated route scopes.
+	 * Must be called before `registerRoutes`.
+	 */
+	registerMiddleware(middleware: TenantAuthMiddleware): this {
+		this.authMiddleware = middleware;
 		return this;
 	}
 
-	registerRoutes(routes: BaseRoute[]): this {
-		for (const route of routes) {
-			this.server.register(async (fastify: FastifyInstance) => {
+	/**
+	 * Registers routes without any authentication middleware.
+	 * Use for public endpoints (e.g. health check, tenant creation).
+	 */
+	registerPublicRoutes(routes: BaseRoute[]): this {
+		this.server.register(async (fastify: FastifyInstance) => {
+			for (const route of routes) {
 				await route.register(fastify);
-			});
-		}
+			}
+		});
+		return this;
+	}
+
+	/**
+	 * Registers routes inside an authenticated scope.
+	 * The `TenantAuthMiddleware` is applied as an `onRequest` hook scoped only
+	 * to these routes — public routes registered via `registerPublicRoutes`
+	 * are not affected.
+	 */
+	registerRoutes(routes: BaseRoute[]): this {
+		const middleware = this.authMiddleware;
+		this.server.register(async (fastify: FastifyInstance) => {
+			if (middleware) {
+				fastify.addHook("onRequest", middleware.handle);
+			}
+			for (const route of routes) {
+				await route.register(fastify);
+			}
+		});
 		return this;
 	}
 
