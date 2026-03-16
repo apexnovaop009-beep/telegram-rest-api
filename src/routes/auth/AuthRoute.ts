@@ -76,12 +76,10 @@ export class AuthRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[
-							{
-								phoneCodeHash: result.phoneCodeHash,
-								sessionId: telegram.getSession(),
-							},
-						],
+						{
+							phoneCodeHash: result.phoneCodeHash,
+							sessionId: telegram.getSession(),
+						},
 						"Verification code sent",
 					).send(reply);
 				} catch (error: unknown) {
@@ -125,7 +123,7 @@ export class AuthRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result, sessionId],
+						{ result, sessionId },
 						"Verification code resent",
 					).send(reply);
 				} catch (error: unknown) {
@@ -177,7 +175,7 @@ export class AuthRoute extends BaseRoute {
 					await this.saveSession(request, telegram, result.user as Api.User);
 
 					new SuccessResponse(
-						[{ result, sessionId: activeSessionId }],
+						{ result, sessionId: activeSessionId },
 						"Signed in successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -229,7 +227,7 @@ export class AuthRoute extends BaseRoute {
 					await this.saveSession(request, telegram, result.user as Api.User);
 
 					new SuccessResponse(
-						[{ result, sessionId: activeSessionId }],
+						{ result, sessionId: activeSessionId },
 						"Signed up successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -259,7 +257,7 @@ export class AuthRoute extends BaseRoute {
 					// Explicit invalidate on success: removes from pool and deletes DB record.
 					await TelegramClientService.invalidate(sessionId);
 
-					new SuccessResponse([], "Logged out successfully").send(reply);
+					new SuccessResponse({}, "Logged out successfully").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -295,7 +293,7 @@ export class AuthRoute extends BaseRoute {
 					await this.saveSession(request, telegram, result.user as Api.User);
 
 					new SuccessResponse(
-						[{ result, sessionId }],
+						{ result, sessionId },
 						"Two-factor authentication successful",
 					).send(reply);
 				} catch (error: unknown) {

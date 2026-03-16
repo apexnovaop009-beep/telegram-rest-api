@@ -158,7 +158,12 @@ export class MessageRoute extends BaseRoute {
 
 								const registeredMedia = await Promise.all(
 									uploadedInputMedia.map((media: Api.TypeInputMedia) =>
-										tc.invoke(new Api.messages.UploadMedia({ peer: resolvedPeer, media })),
+										tc.invoke(
+											new Api.messages.UploadMedia({
+												peer: resolvedPeer,
+												media,
+											}),
+										),
 									),
 								);
 
@@ -280,9 +285,7 @@ export class MessageRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Reaction sent successfully").send(
-						reply,
-					);
+					new SuccessResponse(result, "Reaction sent successfully").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -318,7 +321,7 @@ export class MessageRoute extends BaseRoute {
 							.invoke(new Api.messages.ReadHistory({ peer, maxId })),
 					);
 
-					new SuccessResponse([result], "History marked as read").send(reply);
+					new SuccessResponse(result, "History marked as read").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -345,7 +348,7 @@ export class MessageRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Received messages fetched successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -390,7 +393,7 @@ export class MessageRoute extends BaseRoute {
 							),
 					);
 
-					new SuccessResponse([result], "Messages deleted successfully").send(
+					new SuccessResponse(result, "Messages deleted successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {

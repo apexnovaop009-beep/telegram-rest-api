@@ -96,9 +96,7 @@ export class ChatRoute extends BaseRoute {
 						},
 					);
 
-					new SuccessResponse([data], "Dialogs fetched successfully").send(
-						reply,
-					);
+					new SuccessResponse(data, "Dialogs fetched successfully").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -132,9 +130,7 @@ export class ChatRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Chats fetched successfully").send(
-						reply,
-					);
+					new SuccessResponse(result, "Chats fetched successfully").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -168,7 +164,7 @@ export class ChatRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Full chat fetched successfully").send(
+					new SuccessResponse(result, "Full chat fetched successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -203,9 +199,7 @@ export class ChatRoute extends BaseRoute {
 							.invoke(new Api.messages.CreateChat({ users, title })),
 					);
 
-					new SuccessResponse([result], "Chat created successfully").send(
-						reply,
-					);
+					new SuccessResponse(result, "Chat created successfully").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -244,9 +238,7 @@ export class ChatRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Chat deleted successfully").send(
-						reply,
-					);
+					new SuccessResponse(result, "Chat deleted successfully").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -286,7 +278,7 @@ export class ChatRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"User deleted from chat successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -327,7 +319,7 @@ export class ChatRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Chat admin rights updated successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -378,9 +370,10 @@ export class ChatRoute extends BaseRoute {
 				};
 
 				if (!sessionId || !chatId) {
-					return new ErrorResponse("sessionId and chatId are required", 400).send(
-						reply,
-					);
+					return new ErrorResponse(
+						"sessionId and chatId are required",
+						400,
+					).send(reply);
 				}
 
 				try {
@@ -409,7 +402,7 @@ export class ChatRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Default banned rights updated successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -466,7 +459,7 @@ export class ChatRoute extends BaseRoute {
 						},
 					);
 
-					new SuccessResponse([result], "Chat photo updated successfully").send(
+					new SuccessResponse(result, "Chat photo updated successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -504,7 +497,7 @@ export class ChatRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Chat title updated successfully").send(
+					new SuccessResponse(result, "Chat title updated successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {

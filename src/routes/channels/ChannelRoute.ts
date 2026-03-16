@@ -67,7 +67,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Channels fetched successfully").send(
+					new SuccessResponse(result, "Channels fetched successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -107,10 +107,9 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse(
-						{ available: result },
-						"Username checked successfully",
-					).send(reply);
+					new SuccessResponse(result, "Username checked successfully").send(
+						reply,
+					);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -156,7 +155,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Channel created successfully").send(
+					new SuccessResponse(result, "Channel created successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -195,7 +194,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Channel deleted successfully").send(
+					new SuccessResponse(result, "Channel deleted successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -244,7 +243,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "History deleted successfully").send(
+					new SuccessResponse(result, "History deleted successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -284,7 +283,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Messages deleted successfully").send(
+					new SuccessResponse(result, "Messages deleted successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -334,7 +333,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Participant history deleted successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -418,10 +417,9 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse(
-						[result],
-						"Admin rights updated successfully",
-					).send(reply);
+					new SuccessResponse(result, "Admin rights updated successfully").send(
+						reply,
+					);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -519,7 +517,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Ban rights updated successfully").send(
+					new SuccessResponse(result, "Ban rights updated successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -597,7 +595,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Channel ownership transferred successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -657,7 +655,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Channel photo updated successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -698,7 +696,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Channel title updated successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -737,7 +735,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Full channel info fetched successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -767,7 +765,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Groups for discussion fetched successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -795,7 +793,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Inactive channels fetched successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -828,7 +826,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Left channels fetched successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -867,7 +865,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Messages fetched successfully").send(
+					new SuccessResponse(result, "Messages fetched successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -914,10 +912,9 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse(
-						[result],
-						"Participant fetched successfully",
-					).send(reply);
+					new SuccessResponse(result, "Participant fetched successfully").send(
+						reply,
+					);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -957,7 +954,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Send-as peers fetched successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -997,9 +994,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Users invited successfully").send(
-						reply,
-					);
+					new SuccessResponse(result, "Users invited successfully").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -1035,7 +1030,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Joined channel successfully").send(
+					new SuccessResponse(result, "Joined channel successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -1072,9 +1067,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Left channel successfully").send(
-						reply,
-					);
+					new SuccessResponse(result, "Left channel successfully").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -1117,7 +1110,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "History marked as read").send(reply);
+					new SuccessResponse(result, "History marked as read").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -1155,7 +1148,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Message contents marked as read").send(
+					new SuccessResponse(result, "Message contents marked as read").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -1195,7 +1188,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Username updated successfully").send(
+					new SuccessResponse(result, "Username updated successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -1237,7 +1230,7 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Slow mode updated successfully").send(
+					new SuccessResponse(result, "Slow mode updated successfully").send(
 						reply,
 					);
 				} catch (error: unknown) {
@@ -1278,7 +1271,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Join-to-send setting updated successfully",
 					).send(reply);
 				} catch (error: unknown) {
@@ -1319,7 +1312,7 @@ export class ChannelRoute extends BaseRoute {
 					);
 
 					new SuccessResponse(
-						[result],
+						result,
 						"Join-request setting updated successfully",
 					).send(reply);
 				} catch (error: unknown) {
