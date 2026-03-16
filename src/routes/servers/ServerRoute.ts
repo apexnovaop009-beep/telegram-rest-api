@@ -182,62 +182,62 @@ export class ServerRoute extends BaseRoute {
 			protected_.post(
 				"/server/DeleteTenant",
 				async (request: FastifyRequest, reply: FastifyReply) => {
-					const { id } = request.body as { id?: number };
+				const { id } = request.body as { id?: string | number };
 
-					if (!id) {
-						return new ErrorResponse("tenant id is required", 400).send(reply);
-					}
+				if (!id) {
+					return new ErrorResponse("tenant id is required", 400).send(reply);
+				}
 
-					const serverName = process.env.SERVER_NAME ?? "";
-					if (!serverName) {
+				const serverName = process.env.SERVER_NAME ?? "";
+				if (!serverName) {
+					return new ErrorResponse(
+						"SERVER_NAME is not configured on this server",
+						500,
+					).send(reply);
+				}
+
+				try {
+					const db = DatabaseClient.getInstance();
+
+					const tenant = await db.execute<any>((prisma) =>
+						(prisma as any).tenant.findFirst({
+							where: { id: parseInt(id as string), server_name: serverName },
+							select: { id: true, secret_id: true, secret_code: true },
+						}),
+					);
+
+					if (!tenant) {
 						return new ErrorResponse(
-							"SERVER_NAME is not configured on this server",
-							500,
+							"Tenant not found on this server",
+							404,
 						).send(reply);
 					}
 
-					try {
-						const db = DatabaseClient.getInstance();
+					// Immediately regenerate credentials to lock the tenant out
+					const { secretId, secretCode } =
+						TenantService.generateCredentials();
 
-						const tenant = await db.execute<any>((prisma) =>
-							(prisma as any).tenant.findFirst({
-								where: { id, server_name: serverName },
-								select: { id: true, secret_id: true, secret_code: true },
-							}),
-						);
+					await TenantService.invalidate(
+						tenant.secret_id,
+						tenant.secret_code,
+					);
 
-						if (!tenant) {
-							return new ErrorResponse(
-								"Tenant not found on this server",
-								404,
-							).send(reply);
-						}
+					await db.execute((prisma) =>
+						(prisma as any).tenant.update({
+							where: { id: parseInt(id as string) },
+							data: { secret_id: secretId, secret_code: secretCode },
+						}),
+					);
 
-						// Immediately regenerate credentials to lock the tenant out
-						const { secretId, secretCode } =
-							TenantService.generateCredentials();
+					// Enqueue the actual deletion for background processing
+					const job = await QueueJobService.enqueue(
+						QueueJobType.DELETE_TENANT,
+						{ tenantId: parseInt(id as string) },
+					);
 
-						await TenantService.invalidate(
-							tenant.secret_id,
-							tenant.secret_code,
-						);
-
-						await db.execute((prisma) =>
-							(prisma as any).tenant.update({
-								where: { id },
-								data: { secret_id: secretId, secret_code: secretCode },
-							}),
-						);
-
-						// Enqueue the actual deletion for background processing
-						const job = await QueueJobService.enqueue(
-							QueueJobType.DELETE_TENANT,
-							{ tenantId: id },
-						);
-
-						new SuccessResponse({ id }, "Tenant deletion is in progress").send(
-							reply,
-						);
+					new SuccessResponse({ id: parseInt(id as string) }, "Tenant deletion is in progress").send(
+						reply,
+					);
 					} catch (error: unknown) {
 						ErrorResponse.fromError(error, 500).send(reply);
 					}
@@ -250,40 +250,40 @@ export class ServerRoute extends BaseRoute {
 			protected_.patch(
 				"/server/UpdateCallbackUrl",
 				async (request: FastifyRequest, reply: FastifyReply) => {
-					const { id, callbackUrl } = request.body as {
-						id?: number;
-						callbackUrl?: string;
-					};
+				const { id, callbackUrl } = request.body as {
+					id?: string | number;
+					callbackUrl?: string;
+				};
 
-					if (!id || !callbackUrl) {
+				if (!id || !callbackUrl) {
+					return new ErrorResponse(
+						"id and callbackUrl are required",
+						400,
+					).send(reply);
+				}
+
+				const serverName = process.env.SERVER_NAME ?? "";
+
+				try {
+					const db = DatabaseClient.getInstance();
+
+					const tenant = await db.execute<any>((prisma) =>
+						(prisma as any).tenant.findFirst({
+							where: { id: parseInt(id as string), server_name: serverName },
+						}),
+					);
+
+					if (!tenant) {
 						return new ErrorResponse(
-							"id and callbackUrl are required",
-							400,
+							"Tenant not found on this server",
+							404,
 						).send(reply);
 					}
 
-					const serverName = process.env.SERVER_NAME ?? "";
-
-					try {
-						const db = DatabaseClient.getInstance();
-
-						const tenant = await db.execute<any>((prisma) =>
-							(prisma as any).tenant.findFirst({
-								where: { id, server_name: serverName },
-							}),
-						);
-
-						if (!tenant) {
-							return new ErrorResponse(
-								"Tenant not found on this server",
-								404,
-							).send(reply);
-						}
-
-						const updated = await db.execute<any>((prisma) =>
-							(prisma as any).tenant.update({
-								where: { id },
-								data: { callback_url: callbackUrl },
+					const updated = await db.execute<any>((prisma) =>
+						(prisma as any).tenant.update({
+							where: { id: parseInt(id as string) },
+							data: { callback_url: callbackUrl },
 								select: {
 									id: true,
 									secret_id: true,
@@ -311,7 +311,7 @@ export class ServerRoute extends BaseRoute {
 			protected_.post(
 				"/server/RegenerateTenantCredentials",
 				async (request: FastifyRequest, reply: FastifyReply) => {
-					const { id } = request.body as { id?: number };
+					const { id } = request.body as { id?: string | number };
 
 					if (!id) {
 						return new ErrorResponse("id is required", 400).send(reply);
@@ -324,7 +324,7 @@ export class ServerRoute extends BaseRoute {
 
 						const tenant = await db.execute<any>((prisma) =>
 							(prisma as any).tenant.findFirst({
-								where: { id, server_name: serverName },
+								where: { id: parseInt(id as string), server_name: serverName },
 								select: { id: true, secret_id: true, secret_code: true },
 							}),
 						);
@@ -347,7 +347,7 @@ export class ServerRoute extends BaseRoute {
 
 						const updated = await db.execute<any>((prisma) =>
 							(prisma as any).tenant.update({
-								where: { id },
+								where: { id: parseInt(id as string) },
 								data: {
 									secret_id: newSecretId,
 									secret_code: newSecretCode,
