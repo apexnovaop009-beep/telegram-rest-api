@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { RedisClient } from "../redis/RedisClient";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { Tenant } from "./interface/ITenant";
@@ -71,6 +71,16 @@ export class TenantService {
 			JSON.stringify(tenant),
 			TenantService.TTL_SECONDS,
 		);
+	}
+
+	/**
+	 * Generates a fresh pair of tenant credentials.
+	 */
+	static generateCredentials(): { secretId: string; secretCode: string } {
+		return {
+			secretId: randomBytes(10).toString("hex"),
+			secretCode: randomBytes(25).toString("hex"),
+		};
 	}
 
 	/**

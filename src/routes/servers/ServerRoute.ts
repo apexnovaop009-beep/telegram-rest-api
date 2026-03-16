@@ -1,9 +1,9 @@
-import { randomBytes } from "crypto";
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { BaseRoute } from "../BaseRoute";
 import { SuccessResponse, ErrorResponse } from "../../http/ApiResponse";
 import { DatabaseClient } from "../../database/DatabaseClient";
 import { TelegramClientService } from "../../telegram/TelegramClientService";
+import { TenantService } from "../../services/TenantService";
 import { SessionStatus } from "../../database/constants/SessionStatus";
 import { ServerAuthMiddleware } from "../../http/middleware/ServerAuthMiddleware";
 
@@ -55,14 +55,10 @@ export class ServerRoute extends BaseRoute {
 					}
 
 					try {
-						// 20-char hex secret_id, 50-char hex secret_code
-						const secretId = randomBytes(10).toString("hex"); // 20 chars
-						const secretCode = randomBytes(25).toString("hex"); // 50 chars
-
-						// eslint-disable-next-line @typescript-eslint/no-explicit-any
+						const { secretId, secretCode } =
+							TenantService.generateCredentials();
 						const tenant = await DatabaseClient.getInstance().execute<any>(
 							(prisma) =>
-								// eslint-disable-next-line @typescript-eslint/no-explicit-any
 								(prisma as any).tenant.create({
 									data: {
 										secret_id: secretId,
@@ -245,6 +241,133 @@ export class ServerRoute extends BaseRoute {
 						new SuccessResponse(
 							{ id, totalSessions: sessions.length },
 							"Tenant deleted successfully",
+						).send(reply);
+					} catch (error: unknown) {
+						ErrorResponse.fromError(error, 500).send(reply);
+					}
+				},
+			);
+			/**
+			 * Updates the callback URL for a specific tenant on this server.
+			 */
+			protected_.patch(
+				"/server/UpdateCallbackUrl",
+				async (request: FastifyRequest, reply: FastifyReply) => {
+					const { id, callbackUrl } = request.body as {
+						id?: number;
+						callbackUrl?: string;
+					};
+
+					if (!id || !callbackUrl) {
+						return new ErrorResponse(
+							"id and callbackUrl are required",
+							400,
+						).send(reply);
+					}
+
+					const serverName = process.env.SERVER_NAME ?? "";
+
+					try {
+						const db = DatabaseClient.getInstance();
+
+						const tenant = await db.execute<any>((prisma) =>
+							(prisma as any).tenant.findFirst({
+								where: { id, server_name: serverName },
+							}),
+						);
+
+						if (!tenant) {
+							return new ErrorResponse(
+								"Tenant not found on this server",
+								404,
+							).send(reply);
+						}
+
+						const updated = await db.execute<any>((prisma) =>
+							(prisma as any).tenant.update({
+								where: { id },
+								data: { callback_url: callbackUrl },
+								select: {
+									id: true,
+									secret_id: true,
+									callback_url: true,
+									updated_at: true,
+								},
+							}),
+						);
+
+						new SuccessResponse(
+							updated,
+							"Callback URL updated successfully",
+						).send(reply);
+					} catch (error: unknown) {
+						ErrorResponse.fromError(error, 500).send(reply);
+					}
+				},
+			);
+
+			/**
+			 * Regenerates secret_id and secret_code for a specific tenant on this server.
+			 * The old credentials are immediately invalidated — any cached Redis entries
+			 * must be considered stale after this call.
+			 */
+			protected_.post(
+				"/server/RegenerateCredentials",
+				async (request: FastifyRequest, reply: FastifyReply) => {
+					const { id } = request.body as { id?: number };
+
+					if (!id) {
+						return new ErrorResponse("id is required", 400).send(reply);
+					}
+
+					const serverName = process.env.SERVER_NAME ?? "";
+
+					try {
+						const db = DatabaseClient.getInstance();
+
+						const tenant = await db.execute<any>((prisma) =>
+							(prisma as any).tenant.findFirst({
+								where: { id, server_name: serverName },
+								select: { id: true, secret_id: true, secret_code: true },
+							}),
+						);
+
+						if (!tenant) {
+							return new ErrorResponse(
+								"Tenant not found on this server",
+								404,
+							).send(reply);
+						}
+
+						const { secretId: newSecretId, secretCode: newSecretCode } =
+							TenantService.generateCredentials();
+
+						// Invalidate the old credentials from Redis before overwriting
+						await TenantService.invalidate(
+							tenant.secret_id,
+							tenant.secret_code,
+						);
+
+						const updated = await db.execute<any>((prisma) =>
+							(prisma as any).tenant.update({
+								where: { id },
+								data: {
+									secret_id: newSecretId,
+									secret_code: newSecretCode,
+								},
+								select: {
+									id: true,
+									secret_id: true,
+									secret_code: true,
+									callback_url: true,
+									updated_at: true,
+								},
+							}),
+						);
+
+						new SuccessResponse(
+							updated,
+							"Credentials regenerated successfully",
 						).send(reply);
 					} catch (error: unknown) {
 						ErrorResponse.fromError(error, 500).send(reply);
