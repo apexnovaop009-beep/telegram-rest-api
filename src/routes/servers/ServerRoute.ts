@@ -312,7 +312,7 @@ export class ServerRoute extends BaseRoute {
 			 * must be considered stale after this call.
 			 */
 			protected_.post(
-				"/server/RegenerateCredentials",
+				"/server/RegenerateTenantCredentials",
 				async (request: FastifyRequest, reply: FastifyReply) => {
 					const { id } = request.body as { id?: number };
 
