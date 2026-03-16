@@ -48,10 +48,9 @@ export class MessageRoute extends BaseRoute {
 				};
 
 				if (!sessionId || !peer) {
-					return new ErrorResponse(
-						"sessionId and peer are required",
-						400,
-					).send(reply);
+					return new ErrorResponse("sessionId and peer are required", 400).send(
+						reply,
+					);
 				}
 
 				const hasVisual = photos.length > 0 || videos.length > 0;
@@ -82,18 +81,34 @@ export class MessageRoute extends BaseRoute {
 							const tc = clientService.getClient();
 							const sent: unknown[] = [];
 
+							// GramJS requires peers to be in its in-memory entity cache.
+							// On a fresh process start the cache is empty; calling getDialogs
+							// populates it. We attempt resolution first (fast path), and only
+							// fetch dialogs if it fails (slow path, once per missing peer).
+							let resolvedPeer: Awaited<ReturnType<typeof tc.getInputEntity>>;
+							try {
+								resolvedPeer = await tc.getInputEntity(peer);
+							} catch {
+								await tc.getDialogs({ limit: 200 });
+								resolvedPeer = await tc.getInputEntity(peer);
+							}
+
 							const commonFlags = {
 								silent,
 								background,
 								...(scheduleDate && { scheduleDate }),
-								...(replyToMsgId && { replyToMsgId }),
+								...(replyToMsgId && {
+									replyTo: new Api.InputReplyToMessage({
+										replyToMsgId,
+									}),
+								}),
 							};
 
 							// No media at all → plain text message
 							if (visualMedia.length === 0 && docMedia.length === 0) {
 								const r = await tc.invoke(
 									new Api.messages.SendMessage({
-										peer,
+										peer: resolvedPeer,
 										message,
 										...commonFlags,
 										randomId: TelegramUtils.randomId(),
@@ -123,7 +138,7 @@ export class MessageRoute extends BaseRoute {
 									);
 									const r = await tc.invoke(
 										new Api.messages.SendMedia({
-											peer,
+											peer: resolvedPeer,
 											media,
 											message: caption,
 											...commonFlags,
@@ -143,7 +158,7 @@ export class MessageRoute extends BaseRoute {
 
 								const registeredMedia = await Promise.all(
 									uploadedInputMedia.map((media: Api.TypeInputMedia) =>
-										tc.invoke(new Api.messages.UploadMedia({ peer, media })),
+										tc.invoke(new Api.messages.UploadMedia({ peer: resolvedPeer, media })),
 									),
 								);
 
@@ -199,7 +214,7 @@ export class MessageRoute extends BaseRoute {
 
 								const r = await tc.invoke(
 									new Api.messages.SendMultiMedia({
-										peer,
+										peer: resolvedPeer,
 										multiMedia,
 										...commonFlags,
 									}),
@@ -219,9 +234,7 @@ export class MessageRoute extends BaseRoute {
 						},
 					);
 
-					new SuccessResponse(results, "Message sent successfully").send(
-						reply,
-					);
+					new SuccessResponse(results, "Message sent successfully").send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -372,7 +385,9 @@ export class MessageRoute extends BaseRoute {
 					const result = await this.withTelegramSession(sessionId, (client) =>
 						client
 							.getClient()
-							.invoke(new Api.messages.DeleteMessages({ id: id.map(Number), revoke })),
+							.invoke(
+								new Api.messages.DeleteMessages({ id: id.map(Number), revoke }),
+							),
 					);
 
 					new SuccessResponse([result], "Messages deleted successfully").send(
