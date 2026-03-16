@@ -30,6 +30,7 @@ interface MessageLogEntry {
 	replyToMessageId?: number;
 	forwardFromId?: string;
 	media?: MediaInfo;
+	mediaPath?: string;
 }
 
 /**
@@ -115,15 +116,74 @@ export class IncomingMessageHandler {
 
 	private static readonly INIT_DELAY_MS = 5000;
 
+	private static readonly DOWNLOADABLE_TYPES = new Set([
+		"photo",
+		"video",
+		"audio",
+		"document",
+	]);
+
+	private static ensureChatDir(chatId: string): string {
+		const chatDir = path.join(IncomingMessageHandler.STORAGE_DIR, chatId);
+		if (!fs.existsSync(chatDir)) {
+			fs.mkdirSync(chatDir, { recursive: true });
+		}
+		return chatDir;
+	}
+
+	private static resolveMediaFileName(
+		mediaInfo: MediaInfo,
+		messageId: number,
+	): string {
+		if (mediaInfo.type === "photo") {
+			return `${messageId}_${mediaInfo.id}.jpg`;
+		}
+
+		if (mediaInfo.fileName) {
+			return `${messageId}_${mediaInfo.fileName}`;
+		}
+
+		const ext = mediaInfo.mimeType
+			? `.${mediaInfo.mimeType.split("/")[1] ?? "bin"}`
+			: ".bin";
+		return `${messageId}_${mediaInfo.id}${ext}`;
+	}
+
+	private async downloadMediaFile(
+		message: Api.Message,
+		chatId: string,
+		mediaInfo: MediaInfo,
+	): Promise<string | undefined> {
+		try {
+			const chatDir = IncomingMessageHandler.ensureChatDir(chatId);
+			const fileName = IncomingMessageHandler.resolveMediaFileName(
+				mediaInfo,
+				message.id,
+			);
+			const filePath = path.join(chatDir, fileName);
+
+			await this.client.downloadMedia(message, { outputFile: filePath });
+			return filePath;
+		} catch (error) {
+			console.error(
+				`Failed to download media for message ${message.id} in chat ${chatId}:`,
+				error,
+			);
+			return undefined;
+		}
+	}
+
 	async start(): Promise<void> {
 		this.handler = async (event: NewMessageEvent) => {
 			try {
 				const message = event.message;
+				const chatId = message.chatId?.toString() ?? "";
+				const mediaInfo = IncomingMessageHandler.extractMedia(message.media);
 
 				const entry: MessageLogEntry = {
 					timestamp: new Date().toISOString(),
 					messageId: message.id,
-					chatId: message.chatId?.toString() ?? "",
+					chatId,
 					senderId: message.senderId?.toString() ?? "",
 					isPrivate: event.isPrivate ?? false,
 					isGroup: event.isGroup ?? false,
@@ -132,8 +192,20 @@ export class IncomingMessageHandler {
 					date: message.date,
 					replyToMessageId: message.replyTo?.replyToMsgId,
 					forwardFromId: message.fwdFrom?.fromId?.toString(),
-					media: IncomingMessageHandler.extractMedia(message.media),
+					media: mediaInfo,
 				};
+
+				if (
+					mediaInfo &&
+					chatId &&
+					IncomingMessageHandler.DOWNLOADABLE_TYPES.has(mediaInfo.type)
+				) {
+					entry.mediaPath = await this.downloadMediaFile(
+						message,
+						chatId,
+						mediaInfo,
+					);
+				}
 
 				const logPath = path.join(
 					IncomingMessageHandler.STORAGE_DIR,
@@ -156,7 +228,10 @@ export class IncomingMessageHandler {
 		await this.delay(IncomingMessageHandler.INIT_DELAY_MS);
 
 		try {
-			await this.client.getDialogs({ limit: 1 });
+			// Fetch recent dialogs to populate GramJS's in-memory entity cache.
+			// Without this, peer resolution for any chat not yet encountered in
+			// the current process lifetime will throw "Could not find input entity".
+			await this.client.getDialogs({ limit: 100 });
 		} catch {
 			// Non-fatal — events may still work if the session already has update state
 		}
