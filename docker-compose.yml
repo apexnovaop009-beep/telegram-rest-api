@@ -1,4 +1,6 @@
 services:
+  # Production
+  # docker compose --profile production up api --build -d
   api:
     build:
       context: .
