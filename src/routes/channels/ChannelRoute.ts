@@ -107,9 +107,10 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Username checked successfully").send(
-						reply,
-					);
+					new SuccessResponse(
+						{ available: result },
+						"Username checked successfully",
+					).send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -499,7 +500,9 @@ export class ChannelRoute extends BaseRoute {
 									// untilDate is a conditional TL field — only include it when
 									// a real future Unix timestamp is provided. Passing 0 causes
 									// Telegram to reject the request with UNTIL_DATE_INVALID.
-									...(bannedRights?.untilDate ? { untilDate: bannedRights.untilDate } : {}),
+									...(bannedRights?.untilDate
+										? { untilDate: bannedRights.untilDate }
+										: {}),
 									viewMessages: bannedRights?.viewMessages ?? false,
 									sendMessages: bannedRights?.sendMessages ?? false,
 									sendMedia: bannedRights?.sendMedia ?? false,
@@ -788,9 +791,7 @@ export class ChannelRoute extends BaseRoute {
 
 				try {
 					const result = await this.withTelegramSession(sessionId, (client) =>
-						client
-							.getClient()
-							.invoke(new Api.channels.GetInactiveChannels({})),
+						client.getClient().invoke(new Api.channels.GetInactiveChannels({})),
 					);
 
 					new SuccessResponse(
@@ -821,9 +822,9 @@ export class ChannelRoute extends BaseRoute {
 
 				try {
 					const result = await this.withTelegramSession(sessionId, (client) =>
-						client.getClient().invoke(
-							new Api.channels.GetLeftChannels({ offset }),
-						),
+						client
+							.getClient()
+							.invoke(new Api.channels.GetLeftChannels({ offset })),
 					);
 
 					new SuccessResponse(
@@ -996,10 +997,9 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse(
-						[result],
-						"Users invited successfully",
-					).send(reply);
+					new SuccessResponse([result], "Users invited successfully").send(
+						reply,
+					);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -1072,7 +1072,9 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse([result], "Left channel successfully").send(reply);
+					new SuccessResponse([result], "Left channel successfully").send(
+						reply,
+					);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -1086,13 +1088,17 @@ export class ChannelRoute extends BaseRoute {
 		fastify.post(
 			"/channels/ReadHistory",
 			async (request: FastifyRequest, reply: FastifyReply) => {
-				const { sessionId, channelId, accessHash, maxId = 0 } =
-					request.body as {
-						sessionId: string;
-						channelId: string;
-						accessHash: string;
-						maxId?: number;
-					};
+				const {
+					sessionId,
+					channelId,
+					accessHash,
+					maxId = 0,
+				} = request.body as {
+					sessionId: string;
+					channelId: string;
+					accessHash: string;
+					maxId?: number;
+				};
 
 				if (!sessionId || !channelId || !accessHash) {
 					return new ErrorResponse(
@@ -1149,10 +1155,9 @@ export class ChannelRoute extends BaseRoute {
 						),
 					);
 
-					new SuccessResponse(
-						[result],
-						"Message contents marked as read",
-					).send(reply);
+					new SuccessResponse([result], "Message contents marked as read").send(
+						reply,
+					);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}
@@ -1166,13 +1171,12 @@ export class ChannelRoute extends BaseRoute {
 		fastify.post(
 			"/channels/UpdateUsername",
 			async (request: FastifyRequest, reply: FastifyReply) => {
-				const { sessionId, channelId, accessHash, username } =
-					request.body as {
-						sessionId: string;
-						channelId: string;
-						accessHash: string;
-						username: string;
-					};
+				const { sessionId, channelId, accessHash, username } = request.body as {
+					sessionId: string;
+					channelId: string;
+					accessHash: string;
+					username: string;
+				};
 
 				if (!sessionId || !channelId || !accessHash || username === undefined) {
 					return new ErrorResponse(
@@ -1209,20 +1213,14 @@ export class ChannelRoute extends BaseRoute {
 		fastify.post(
 			"/channels/ToggleSlowMode",
 			async (request: FastifyRequest, reply: FastifyReply) => {
-				const { sessionId, channelId, accessHash, seconds } =
-					request.body as {
-						sessionId: string;
-						channelId: string;
-						accessHash: string;
-						seconds: number;
-					};
+				const { sessionId, channelId, accessHash, seconds } = request.body as {
+					sessionId: string;
+					channelId: string;
+					accessHash: string;
+					seconds: number;
+				};
 
-				if (
-					!sessionId ||
-					!channelId ||
-					!accessHash ||
-					seconds === undefined
-				) {
+				if (!sessionId || !channelId || !accessHash || seconds === undefined) {
 					return new ErrorResponse(
 						"sessionId, channelId, accessHash and seconds are required",
 						400,
@@ -1255,20 +1253,14 @@ export class ChannelRoute extends BaseRoute {
 		fastify.post(
 			"/channels/ToggleJoinToSend",
 			async (request: FastifyRequest, reply: FastifyReply) => {
-				const { sessionId, channelId, accessHash, enabled } =
-					request.body as {
-						sessionId: string;
-						channelId: string;
-						accessHash: string;
-						enabled: boolean;
-					};
+				const { sessionId, channelId, accessHash, enabled } = request.body as {
+					sessionId: string;
+					channelId: string;
+					accessHash: string;
+					enabled: boolean;
+				};
 
-				if (
-					!sessionId ||
-					!channelId ||
-					!accessHash ||
-					enabled === undefined
-				) {
+				if (!sessionId || !channelId || !accessHash || enabled === undefined) {
 					return new ErrorResponse(
 						"sessionId, channelId, accessHash and enabled are required",
 						400,
@@ -1302,20 +1294,14 @@ export class ChannelRoute extends BaseRoute {
 		fastify.post(
 			"/channels/ToggleJoinRequest",
 			async (request: FastifyRequest, reply: FastifyReply) => {
-				const { sessionId, channelId, accessHash, enabled } =
-					request.body as {
-						sessionId: string;
-						channelId: string;
-						accessHash: string;
-						enabled: boolean;
-					};
+				const { sessionId, channelId, accessHash, enabled } = request.body as {
+					sessionId: string;
+					channelId: string;
+					accessHash: string;
+					enabled: boolean;
+				};
 
-				if (
-					!sessionId ||
-					!channelId ||
-					!accessHash ||
-					enabled === undefined
-				) {
+				if (!sessionId || !channelId || !accessHash || enabled === undefined) {
 					return new ErrorResponse(
 						"sessionId, channelId, accessHash and enabled are required",
 						400,
