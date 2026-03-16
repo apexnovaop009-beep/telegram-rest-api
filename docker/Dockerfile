@@ -25,8 +25,6 @@ FROM node:22-slim AS production
 
 RUN apt-get update -y && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
 
-ENV NODE_ENV=production
-
 WORKDIR /app
 
 COPY package*.json ./
@@ -37,7 +35,9 @@ RUN npm install
 COPY tsconfig.json ./
 COPY src ./src
 
-RUN npm run build && npm prune --omit=dev && npm cache clean --force
+RUN npm run build; npm prune --omit=dev && npm cache clean --force
+
+ENV NODE_ENV=production
 
 EXPOSE 3000
 
