@@ -10,6 +10,7 @@ dist/
 .idea/
 .trae/
 *.log
+storage/
 docker/
 docker-compose.yml
 README.md
