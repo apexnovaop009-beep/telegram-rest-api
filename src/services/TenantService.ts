@@ -37,7 +37,6 @@ export class TenantService {
 			// Redis unavailable — fall through to DB
 		}
 
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		const tenant = await DatabaseClient.getInstance().execute(
 			(prisma) =>
 				(prisma as any).tenant.findFirst({

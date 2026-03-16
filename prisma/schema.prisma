@@ -41,3 +41,18 @@ model TelegramSession {
 
   @@map("telegram_sessions")
 }
+
+model QueueJob {
+  id          Int      @id @default(autoincrement())
+  type        String   @db.VarChar(100)
+  payload     Json     @default("{}")
+  status      String   @default("pending") @db.VarChar(50)
+  attempts    Int      @default(0)
+  max_attempts Int     @default(3)
+  last_error  String?  @db.Text
+  created_at  DateTime @default(now())
+  updated_at  DateTime @default(now())
+
+  @@index([status, created_at])
+  @@map("queue_jobs")
+}

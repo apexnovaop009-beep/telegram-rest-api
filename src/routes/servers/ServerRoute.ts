@@ -4,12 +4,9 @@ import { SuccessResponse, ErrorResponse } from "../../http/ApiResponse";
 import { DatabaseClient } from "../../database/DatabaseClient";
 import { TelegramClientService } from "../../telegram/TelegramClientService";
 import { TenantService } from "../../services/TenantService";
+import { QueueJobService, QueueJobType } from "../../services/QueueJobService";
 import { SessionStatus } from "../../database/constants/SessionStatus";
 import { ServerAuthMiddleware } from "../../http/middleware/ServerAuthMiddleware";
-
-interface TelegramSessionRecord {
-	session_id: string;
-}
 
 export class ServerRoute extends BaseRoute {
 	async register(fastify: FastifyInstance): Promise<void> {
@@ -104,10 +101,8 @@ export class ServerRoute extends BaseRoute {
 					}
 
 					try {
-						// eslint-disable-next-line @typescript-eslint/no-explicit-any
 						const tenants = await DatabaseClient.getInstance().execute<any[]>(
 							(prisma) =>
-								// eslint-disable-next-line @typescript-eslint/no-explicit-any
 								(prisma as any).tenant.findMany({
 									where: { server_name: serverName },
 									select: {
@@ -154,7 +149,6 @@ export class ServerRoute extends BaseRoute {
 
 						const [activeSessions] = await Promise.all([
 							db.execute<number>((prisma) =>
-								// eslint-disable-next-line @typescript-eslint/no-explicit-any
 								(prisma as any).telegramSession.count({
 									where: {
 										status: SessionStatus.ACTIVE,
@@ -177,7 +171,13 @@ export class ServerRoute extends BaseRoute {
 				},
 			);
 			/**
-			 * Deletes a tenant and all its Telegram sessions from this server.
+			 * Schedules a tenant for deletion.
+			 *
+			 * 1. Regenerates credentials so the tenant is locked out immediately.
+			 * 2. Enqueues a background job to invalidate all Telegram sessions
+			 *    and delete the tenant record.
+			 *
+			 * Body: { "id": 1 }
 			 */
 			protected_.post(
 				"/server/DeleteTenant",
@@ -199,12 +199,10 @@ export class ServerRoute extends BaseRoute {
 					try {
 						const db = DatabaseClient.getInstance();
 
-						// Confirm the tenant belongs to this server before touching anything
-						// eslint-disable-next-line @typescript-eslint/no-explicit-any
 						const tenant = await db.execute<any>((prisma) =>
-							// eslint-disable-next-line @typescript-eslint/no-explicit-any
 							(prisma as any).tenant.findFirst({
 								where: { id, server_name: serverName },
+								select: { id: true, secret_id: true, secret_code: true },
 							}),
 						);
 
@@ -215,38 +213,37 @@ export class ServerRoute extends BaseRoute {
 							).send(reply);
 						}
 
-						// Load every session belonging to this tenant
-						const sessions = await db.execute<TelegramSessionRecord[]>(
-							(prisma) =>
-								prisma.telegramSession.findMany({
-									where: { tenant_id: id },
-									select: { session_id: true },
-								}),
+						// Immediately regenerate credentials to lock the tenant out
+						const { secretId, secretCode } =
+							TenantService.generateCredentials();
+
+						await TenantService.invalidate(
+							tenant.secret_id,
+							tenant.secret_code,
 						);
 
-						// Invalidate sessions one by one.
-						// Sequential processing avoids burst traffic to Telegram and
-						// allows FLOOD_WAIT errors to be handled with a per-session retry.
-						for (const session of sessions) {
-							await this.withFloodWaitRetry(() =>
-								TelegramClientService.invalidate(session.session_id),
-							);
-						}
-
-						// All sessions cleared — safe to delete the tenant record
 						await db.execute((prisma) =>
-							(prisma as any).tenant.delete({ where: { id } }),
+							(prisma as any).tenant.update({
+								where: { id },
+								data: { secret_id: secretId, secret_code: secretCode },
+							}),
 						);
 
-						new SuccessResponse(
-							{ id, totalSessions: sessions.length },
-							"Tenant deleted successfully",
-						).send(reply);
+						// Enqueue the actual deletion for background processing
+						const job = await QueueJobService.enqueue(
+							QueueJobType.DELETE_TENANT,
+							{ tenantId: id },
+						);
+
+						new SuccessResponse({ id }, "Tenant deletion is in progress").send(
+							reply,
+						);
 					} catch (error: unknown) {
 						ErrorResponse.fromError(error, 500).send(reply);
 					}
 				},
 			);
+
 			/**
 			 * Updates the callback URL for a specific tenant on this server.
 			 */
@@ -375,40 +372,5 @@ export class ServerRoute extends BaseRoute {
 				},
 			);
 		}); // end protected scope
-	}
-
-	/**
-	 * Executes `fn` and retries it after the flood-wait delay if Telegram
-	 * responds with a FLOOD_WAIT error. Any other error is re-thrown immediately.
-	 *
-	 * GramJS surfaces flood-waits as errors whose message contains "FLOOD_WAIT_"
-	 * and that carry a `seconds` property indicating how long to wait.
-	 */
-	private async withFloodWaitRetry<T>(fn: () => Promise<T>): Promise<T> {
-		// eslint-disable-next-line no-constant-condition
-		while (true) {
-			try {
-				return await fn();
-			} catch (error: unknown) {
-				const seconds =
-					error instanceof Error &&
-					"seconds" in error &&
-					typeof (error as Error & { seconds: unknown }).seconds === "number"
-						? (error as Error & { seconds: number }).seconds
-						: null;
-
-				if (seconds !== null) {
-					// Add a 1-second buffer on top of the required wait
-					console.warn(
-						`[DeleteTenant] Telegram flood wait — retrying in ${seconds + 1}s`,
-					);
-					await new Promise((resolve) =>
-						setTimeout(resolve, (seconds + 1) * 1000),
-					);
-				} else {
-					throw error;
-				}
-			}
-		}
 	}
 }
