@@ -195,6 +195,7 @@ export class TelegramClientService implements TelegramClientInterface {
 		const handler = new IncomingMessageHandler(
 			client.getClient(),
 			telegramUserId,
+			sessionId,
 		);
 		TelegramClientService.messageHandlers.set(sessionId, handler);
 
