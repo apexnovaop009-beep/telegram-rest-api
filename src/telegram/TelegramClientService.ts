@@ -46,8 +46,9 @@ export class TelegramClientService implements TelegramClientInterface {
 			this.apiId,
 			this.apiHash,
 			{
-				connectionRetries: 5,
-				retryDelay: 5000,
+				connectionRetries: 10,
+				retryDelay: 2000,
+				maxConcurrentDownloads: 4,
 			},
 		);
 	}
