@@ -112,10 +112,8 @@ export class DownloadWorkerService {
 				throw new Error(`Empty download result for task ${task.id}`);
 			}
 
+			// Skip if the task was reclaimed by another worker
 			if (!(await this.stillOwnsTask(task.id))) {
-				console.warn(
-					`[DownloadWorker] Task ${task.id} was reclaimed by another worker — skipping`,
-				);
 				return;
 			}
 
