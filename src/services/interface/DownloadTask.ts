@@ -24,6 +24,6 @@ export interface DownloadTaskRow {
 	id: bigint;
 	file_unique_id: string;
 	raw_input_json: string | null;
-	from_accounts: string[];
+	from_accounts: number[];
 	file_type: string | null;
 }

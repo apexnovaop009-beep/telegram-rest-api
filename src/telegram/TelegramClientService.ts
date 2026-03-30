@@ -124,22 +124,32 @@ export class TelegramClientService implements TelegramClientInterface {
 	}
 
 	/**
-	 * Destroys a pooled client, stops its message handler,
-	 * and deletes the session record from the database.
+	 * Invalidates a session: stops its handlers, deletes the session record
+	 * (cascades to messages, attachments, and tenant state), logs out from
+	 * Telegram, and removes it from the pool.
+	 *
+	 * Returns `false` if the session does not exist on this server, so callers
+	 * can distinguish between a valid logout and an invalid/foreign session.
 	 */
-	static async invalidate(sessionId: string): Promise<void> {
+	static async invalidate(sessionId: string): Promise<boolean> {
 		TelegramClientService.stopMessageHandler(sessionId);
 		TelegramClientService.stopReactionHandler(sessionId);
 
-		// Delete the session record from the database
-		await DatabaseClient.getInstance().execute((prisma) =>
-			prisma.telegramSession.deleteMany({
-				where: { session_id: sessionId },
-			}),
+		const result = await DatabaseClient.getInstance().execute(
+			(prisma) =>
+				prisma.telegramSession.deleteMany({
+					where: {
+						session_id: sessionId,
+						server_name: process.env.SERVER_NAME ?? "",
+					},
+				}) as Promise<{ count: number }>,
 		);
 
+		if (result.count === 0) {
+			return false;
+		}
+
 		if (TelegramClientService.isPooled(sessionId)) {
-			// Destroy the client from the pool and remove it from the pool
 			const client = TelegramClientService.pool.get(
 				sessionId,
 			) as TelegramClientService;
@@ -152,6 +162,8 @@ export class TelegramClientService implements TelegramClientInterface {
 			}
 			TelegramClientService.pool.delete(sessionId);
 		}
+
+		return true;
 	}
 
 	/**

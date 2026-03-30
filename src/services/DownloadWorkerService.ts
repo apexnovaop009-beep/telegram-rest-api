@@ -6,10 +6,7 @@ import { Prisma } from "@prisma/client";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { TelegramClientService } from "../telegram/TelegramClientService";
 import { SessionStatus } from "../database/constants/SessionStatus";
-import {
-	RawInput,
-	DownloadTaskRow,
-} from "./interface/DownloadTask";
+import { RawInput, DownloadTaskRow } from "./interface/DownloadTask";
 
 const MAX_CONCURRENT = parseInt(
 	process.env.MAX_CONCURRENT_DOWNLOADS ?? "5",
@@ -21,6 +18,8 @@ const DOWNLOAD_TIMEOUT_S = parseInt(
 	10,
 );
 const SERVER_NAME = process.env.SERVER_NAME ?? "";
+const STORAGE_BASE_URL = process.env.STORAGE_BASE_URL ?? "";
+const WORKER_ID = `${SERVER_NAME}:${process.pid}`;
 const POLL_INTERVAL_MS = 500;
 const STALE_CHECK_INTERVAL_MS = 60_000;
 const FILES_DIR = path.resolve(process.cwd(), "storage", "files");
@@ -39,9 +38,7 @@ export class DownloadWorkerService {
 
 		this.pollLoop();
 		setInterval(() => this.resetStaleTasks(), STALE_CHECK_INTERVAL_MS);
-		console.log(
-			`[DownloadWorker] Started (max concurrent: ${MAX_CONCURRENT})`,
-		);
+		console.log(`[DownloadWorker] Started (max concurrent: ${MAX_CONCURRENT})`);
 	}
 
 	stop(): void {
@@ -69,24 +66,24 @@ export class DownloadWorkerService {
 
 	private async claimNextTask(): Promise<DownloadTaskRow | null> {
 		const db = DatabaseClient.getInstance();
-		const workerId = process.pid.toString();
-		const rows = await db.execute<DownloadTaskRow[]>((prisma) =>
-			prisma.$queryRaw`
+		const rows = await db.execute<DownloadTaskRow[]>(
+			(prisma) =>
+				prisma.$queryRaw`
 				UPDATE download_tasks
 				SET status = 'processing',
 				    started_at = NOW(),
-				    worker_id = ${workerId}
+				    worker_id = ${WORKER_ID}
 				WHERE id = (
 					SELECT id FROM download_tasks
 				WHERE status = 'pending'
 				AND from_accounts && COALESCE(
 					(
-						SELECT ARRAY_AGG(ts.session_id)
+						SELECT ARRAY_AGG(ts.id)
 						FROM telegram_sessions ts
 						WHERE ts.server_name = ${SERVER_NAME}
 						AND ts.status = ${SessionStatus.ACTIVE}
 					),
-					ARRAY[]::TEXT[]
+					ARRAY[]::INTEGER[]
 				)
 					ORDER BY created_at ASC
 					LIMIT 1
@@ -105,11 +102,9 @@ export class DownloadWorkerService {
 			}
 
 			const rawInput: RawInput = JSON.parse(task.raw_input_json);
-			const client = this.pickClient(task.from_accounts);
+			const client = await this.pickClient(task.from_accounts);
 			if (!client) {
-				throw new Error(
-					`No available Telegram client for task ${task.id}`,
-				);
+				throw new Error(`No available Telegram client for task ${task.id}`);
 			}
 
 			const buffer = await this.downloadFile(client, rawInput);
@@ -117,18 +112,26 @@ export class DownloadWorkerService {
 				throw new Error(`Empty download result for task ${task.id}`);
 			}
 
+			if (!(await this.stillOwnsTask(task.id))) {
+				console.warn(
+					`[DownloadWorker] Task ${task.id} was reclaimed by another worker — skipping`,
+				);
+				return;
+			}
+
 			const ext = this.inferExtension(rawInput);
 			const fileName = `${task.file_unique_id}.${ext}`;
 			const filePath = path.join(FILES_DIR, fileName);
 			fs.writeFileSync(filePath, buffer);
 
-			const fileUrl = path.join("storage", "files", fileName);
+			const relativePath = `storage/files/${fileName}`;
+			const fileUrl = STORAGE_BASE_URL
+				? `${STORAGE_BASE_URL.replace(/\/+$/, "")}/${relativePath}`
+				: relativePath;
 
 			await this.markCompleted(task, filePath, fileUrl);
 
-			console.log(
-				`[DownloadWorker] Completed task ${task.id} → ${fileName}`,
-			);
+			console.log(`[DownloadWorker] Completed task ${task.id} → ${fileName}`);
 		} catch (error) {
 			console.error(
 				`[DownloadWorker] Failed task ${task.id}:`,
@@ -138,16 +141,48 @@ export class DownloadWorkerService {
 		}
 	}
 
-	private pickClient(
-		fromAccounts: string[],
-	): TelegramClientService | undefined {
-		for (const sessionId of fromAccounts) {
-			const svc = TelegramClientService.getFromPool(sessionId);
+	/**
+	 * Verifies this worker still holds the lease on a task. Returns false
+	 * if another server's stale-reset reclaimed the task while the
+	 * download was in flight.
+	 */
+	private async stillOwnsTask(taskId: bigint): Promise<boolean> {
+		const db = DatabaseClient.getInstance();
+		const task = await db.execute(
+			(prisma) =>
+				prisma.downloadTask.findUnique({
+					where: { id: taskId },
+					select: { worker_id: true, status: true },
+				}) as Promise<{
+					worker_id: string | null;
+					status: string;
+				} | null>,
+		);
+		return (
+			task !== null &&
+			task.status === "processing" &&
+			task.worker_id === WORKER_ID
+		);
+	}
+
+	private async pickClient(
+		fromAccounts: number[],
+	): Promise<TelegramClientService | undefined> {
+		const db = DatabaseClient.getInstance();
+		const sessions = await db.execute(
+			(prisma) =>
+				prisma.telegramSession.findMany({
+					where: {
+						id: { in: fromAccounts },
+						status: SessionStatus.ACTIVE,
+					},
+					select: { session_id: true },
+				}) as Promise<{ session_id: string }[]>,
+		);
+
+		for (const { session_id } of sessions) {
+			const svc = TelegramClientService.getFromPool(session_id);
 			if (svc) return svc;
-		}
-		const allPooled = TelegramClientService.getPooledSessionIds();
-		if (allPooled.length > 0) {
-			return TelegramClientService.getFromPool(allPooled[0]);
 		}
 		return undefined;
 	}
@@ -214,9 +249,7 @@ export class DownloadWorkerService {
 						data: { file_url: fileUrl },
 					});
 
-					const messageIds = [
-						...new Set(attachments.map((a) => a.message_id)),
-					];
+					const messageIds = [...new Set(attachments.map((a) => a.message_id))];
 
 					for (const msgId of messageIds) {
 						const pendingCount = await tx.attachment.count({
@@ -261,33 +294,21 @@ export class DownloadWorkerService {
 		});
 	}
 
+	/**
+	 * Resets stale tasks that were claimed by THIS server but exceeded the
+	 * download timeout. Scoped by worker_id prefix so that one server
+	 * cannot accidentally re-queue a task still being processed by another.
+	 */
 	private async resetStaleTasks(): Promise<void> {
 		const db = DatabaseClient.getInstance();
 		const cutoff = new Date(Date.now() - DOWNLOAD_TIMEOUT_S * 1000);
-
-		const sessionIds = await db.execute(
-			(prisma) =>
-				prisma.telegramSession
-					.findMany({
-						where: {
-							status: SessionStatus.ACTIVE,
-							server_name: SERVER_NAME,
-						},
-						select: { session_id: true },
-					})
-					.then((rows: { session_id: string }[]) =>
-						rows.map((r) => r.session_id),
-					) as Promise<string[]>,
-		);
-
-		if (sessionIds.length === 0) return;
 
 		await db.execute((prisma) =>
 			prisma.downloadTask.updateMany({
 				where: {
 					status: "processing",
 					started_at: { lt: cutoff },
-					from_accounts: { hasSome: sessionIds },
+					worker_id: { startsWith: `${SERVER_NAME}:` },
 				},
 				data: {
 					status: "pending",

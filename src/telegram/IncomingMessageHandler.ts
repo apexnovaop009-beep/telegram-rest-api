@@ -128,17 +128,17 @@ export class IncomingMessageHandler {
 								file_unique_id: media.fileUniqueId,
 								file_type: media.fileType,
 								raw_input_json: media.rawInputJson,
-								from_accounts: [this.sessionId],
+								from_accounts: [sessionRecordId],
 								status: "pending",
 							},
 						});
 					} else {
-						if (!existingTask.from_accounts.includes(this.sessionId)) {
+						if (!existingTask.from_accounts.includes(sessionRecordId)) {
 							await tx.downloadTask.update({
 								where: { file_unique_id: media.fileUniqueId },
 								data: {
 									from_accounts: {
-										push: this.sessionId,
+										push: sessionRecordId,
 									},
 								},
 							});

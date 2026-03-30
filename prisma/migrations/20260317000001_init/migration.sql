@@ -6,7 +6,7 @@ CREATE TYPE "DownloadTaskStatus" AS ENUM ('pending', 'processing', 'completed', 
 
 -- CreateTable
 CREATE TABLE "telegram_sessions" (
-    "id" SERIAL NOT NULL,
+    "id" BIGSERIAL NOT NULL,
     "session_id" TEXT NOT NULL,
     "telegram_user_id" VARCHAR(255) NOT NULL,
     "telegram_username" VARCHAR(255) NOT NULL,
@@ -69,7 +69,7 @@ CREATE TABLE "download_tasks" (
 
 -- CreateTable
 CREATE TABLE "tenant_message_state" (
-    "id" SERIAL NOT NULL,
+    "id" BIGSERIAL NOT NULL,
     "session_id" INTEGER NOT NULL,
     "from_account" TEXT NOT NULL,
     "to_account" TEXT NOT NULL,

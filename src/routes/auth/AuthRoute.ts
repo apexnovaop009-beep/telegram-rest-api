@@ -43,7 +43,6 @@ export class AuthRoute extends BaseRoute {
 		await authClient.destroy();
 
 		const freshClient = await TelegramClientService.initialize(sessionId);
-		// Add the authenticated session to the pool
 		TelegramClientService.addToPool(sessionId, freshClient, telegramUserId);
 	}
 
@@ -145,16 +144,27 @@ export class AuthRoute extends BaseRoute {
 		fastify.post(
 			"/auth/SignIn",
 			async (request: FastifyRequest, reply: FastifyReply) => {
-				const { phoneNumber, phoneCodeHash, phoneCode, sessionId, callbackUrl } =
-					request.body as {
-						phoneNumber: string;
-						phoneCodeHash: string;
-						phoneCode: string;
-						sessionId: string;
-						callbackUrl: string;
-					};
+				const {
+					phoneNumber,
+					phoneCodeHash,
+					phoneCode,
+					sessionId,
+					callbackUrl,
+				} = request.body as {
+					phoneNumber: string;
+					phoneCodeHash: string;
+					phoneCode: string;
+					sessionId: string;
+					callbackUrl: string;
+				};
 
-				if (!phoneNumber || !phoneCodeHash || !phoneCode || !sessionId || !callbackUrl) {
+				if (
+					!phoneNumber ||
+					!phoneCodeHash ||
+					!phoneCode ||
+					!sessionId ||
+					!callbackUrl
+				) {
 					return new ErrorResponse(
 						"phoneNumber, phoneCodeHash, phoneCode, sessionId, and callbackUrl are required",
 						400,
@@ -174,7 +184,11 @@ export class AuthRoute extends BaseRoute {
 					);
 
 					const activeSessionId = telegram.getSession();
-					await this.saveSession(telegram, result.user as Api.User, callbackUrl);
+					await this.saveSession(
+						telegram,
+						result.user as Api.User,
+						callbackUrl,
+					);
 
 					new SuccessResponse(
 						{ result, sessionId: activeSessionId },
@@ -197,17 +211,29 @@ export class AuthRoute extends BaseRoute {
 		fastify.post(
 			"/auth/SignUp",
 			async (request: FastifyRequest, reply: FastifyReply) => {
-				const { phoneNumber, phoneCodeHash, firstName, lastName, sessionId, callbackUrl } =
-					request.body as {
-						phoneNumber: string;
-						phoneCodeHash: string;
-						firstName: string;
-						lastName: string;
-						sessionId: string;
-						callbackUrl: string;
-					};
+				const {
+					phoneNumber,
+					phoneCodeHash,
+					firstName,
+					lastName,
+					sessionId,
+					callbackUrl,
+				} = request.body as {
+					phoneNumber: string;
+					phoneCodeHash: string;
+					firstName: string;
+					lastName: string;
+					sessionId: string;
+					callbackUrl: string;
+				};
 
-				if (!phoneNumber || !phoneCodeHash || !firstName || !sessionId || !callbackUrl) {
+				if (
+					!phoneNumber ||
+					!phoneCodeHash ||
+					!firstName ||
+					!sessionId ||
+					!callbackUrl
+				) {
 					return new ErrorResponse(
 						"phoneNumber, phoneCodeHash, firstName, sessionId, and callbackUrl are required",
 						400,
@@ -227,7 +253,11 @@ export class AuthRoute extends BaseRoute {
 					);
 
 					const activeSessionId = telegram.getSession();
-					await this.saveSession(telegram, result.user as Api.User, callbackUrl);
+					await this.saveSession(
+						telegram,
+						result.user as Api.User,
+						callbackUrl,
+					);
 
 					new SuccessResponse(
 						{ result, sessionId: activeSessionId },
@@ -257,8 +287,14 @@ export class AuthRoute extends BaseRoute {
 				}
 
 				try {
-					// Explicit invalidate on success: removes from pool and deletes DB record.
-					await TelegramClientService.invalidate(sessionId);
+					const invalidated = await TelegramClientService.invalidate(sessionId);
+
+					if (!invalidated) {
+						return new ErrorResponse(
+							"Session not found or does not belong to this server",
+							404,
+						).send(reply);
+					}
 
 					new SuccessResponse({}, "Logged out successfully").send(reply);
 				} catch (error: unknown) {
@@ -277,7 +313,10 @@ export class AuthRoute extends BaseRoute {
 				};
 
 				if (!sessionId || !callbackUrl) {
-					return new ErrorResponse("sessionId and callbackUrl are required", 400).send(reply);
+					return new ErrorResponse(
+						"sessionId and callbackUrl are required",
+						400,
+					).send(reply);
 				}
 
 				const telegram = await TelegramClientService.initialize(sessionId);
@@ -294,7 +333,11 @@ export class AuthRoute extends BaseRoute {
 							password: passwordCheck,
 						}),
 					);
-					await this.saveSession(telegram, result.user as Api.User, callbackUrl);
+					await this.saveSession(
+						telegram,
+						result.user as Api.User,
+						callbackUrl,
+					);
 
 					new SuccessResponse(
 						{ result, sessionId },

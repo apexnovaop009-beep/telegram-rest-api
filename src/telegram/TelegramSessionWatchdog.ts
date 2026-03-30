@@ -26,11 +26,16 @@ interface TelegramSessionRecord {
  * The check interval is controlled by `WATCHDOG_INTERVAL_SECONDS` in the
  * environment file (default: 60 seconds).
  */
+const REVOKE_AFTER_FAILURES = 10;
+
 export class TelegramSessionWatchdog {
 	private timer: ReturnType<typeof setInterval> | null = null;
 
 	/** Whether a health-check tick is currently in progress. */
 	private busy = false;
+
+	/** Tracks consecutive `isUserAuthorized()` failures per session. */
+	private readonly failureCounts = new Map<string, number>();
 
 	/**
 	 * Starts the watchdog timer.
@@ -87,8 +92,9 @@ export class TelegramSessionWatchdog {
 	 * Scenario 1: Pool contains a session whose user has logged out.
 	 *
 	 * Iterates every pooled session and calls `isUserAuthorized()`.
-	 * Any session that fails the check is invalidated from the pool and
-	 * its database record is marked as revoked.
+	 * A single failure can be caused by a transient issue (rate limit,
+	 * network hiccup), so the session is only revoked after
+	 * {@link REVOKE_AFTER_FAILURES} consecutive failures.
 	 */
 	private async evictLoggedOutSessions(): Promise<void> {
 		const pooledIds = TelegramClientService.getPooledSessionIds();
@@ -100,15 +106,28 @@ export class TelegramSessionWatchdog {
 			try {
 				const authorized = await client.getClient().isUserAuthorized();
 
-				if (!authorized) {
+				if (authorized) {
+					this.failureCounts.delete(sessionId);
+					continue;
+				}
+
+				const count = (this.failureCounts.get(sessionId) ?? 0) + 1;
+				this.failureCounts.set(sessionId, count);
+
+				if (count >= REVOKE_AFTER_FAILURES) {
+					this.failureCounts.delete(sessionId);
 					await TelegramClientService.invalidate(sessionId);
 					console.log(
-						`[Watchdog] Session "${sessionId}" is no longer authorized — Terminated`,
+						`[Watchdog] Session unauthorized ${count} consecutive times — revoked`,
+					);
+				} else {
+					console.warn(
+						`[Watchdog] Session authorization check failed (${count}/${REVOKE_AFTER_FAILURES})`,
 					);
 				}
 			} catch (error) {
 				console.error(
-					`[Watchdog] Error checking authorization for session "${sessionId}":`,
+					`[Watchdog] Error checking authorization for session:`,
 					error,
 				);
 			}
@@ -129,21 +148,21 @@ export class TelegramSessionWatchdog {
 
 		try {
 			// Get all active sessions from the database by server name and status active
-		activeSessions = await DatabaseClient.getInstance().execute<
-			TelegramSessionRecord[]
-		>((prisma) =>
-			prisma.telegramSession.findMany({
-				select: {
-					id: true,
-					session_id: true,
-					telegram_user_id: true,
-				},
-				where: {
-					status: SessionStatus.ACTIVE,
-					server_name: serverName,
-				},
-			}),
-		);
+			activeSessions = await DatabaseClient.getInstance().execute<
+				TelegramSessionRecord[]
+			>((prisma) =>
+				prisma.telegramSession.findMany({
+					select: {
+						id: true,
+						session_id: true,
+						telegram_user_id: true,
+					},
+					where: {
+						status: SessionStatus.ACTIVE,
+						server_name: serverName,
+					},
+				}),
+			);
 		} catch (error) {
 			console.error("[Watchdog] Failed to query active sessions:", error);
 			return;

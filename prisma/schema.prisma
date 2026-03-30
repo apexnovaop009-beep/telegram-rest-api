@@ -58,7 +58,7 @@ model Message {
   status              MessageStatus @default(pending)
   created_at          DateTime      @default(now())
   updated_at          DateTime      @updatedAt
-  session             TelegramSession @relation(fields: [session_id], references: [id])
+  session             TelegramSession @relation(fields: [session_id], references: [id], onDelete: Cascade)
   attachments         Attachment[]
 
   @@index([session_id, id, status])
@@ -87,7 +87,7 @@ model DownloadTask {
   file_url       String?            @db.Text
   file_type      String?            @db.VarChar(50)
   raw_input_json String?            @db.Text
-  from_accounts  String[]
+  from_accounts  Int[]
   retry_count    Int                @default(0)
   started_at     DateTime?
   worker_id      String?            @db.VarChar(255)
@@ -104,7 +104,7 @@ model TenantMessageState {
   to_account        String   @db.Text
   last_forwarded_id BigInt   @default(0)
   updated_at        DateTime @updatedAt
-  session           TelegramSession @relation(fields: [session_id], references: [id])
+  session           TelegramSession @relation(fields: [session_id], references: [id], onDelete: Cascade)
 
   @@unique([session_id, from_account, to_account])
   @@map("tenant_message_state")
