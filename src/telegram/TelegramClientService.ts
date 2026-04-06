@@ -1,7 +1,6 @@
 import { Api, TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions";
-import { IncomingMessageHandler } from "./IncomingMessageHandler";
-import { IncomingReactionHandler } from "./IncomingReactionHandler";
+import { IncomingEventHandler } from "./IncomingEventHandler";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { SessionStatus } from "../database/constants/SessionStatus";
 import { TelegramClientInterface } from "./interface/Telegram";
@@ -27,13 +26,9 @@ export class TelegramClientService implements TelegramClientInterface {
 	// ── Static Pool State ──────────────────────────────────────────────
 
 	private static readonly pool = new Map<string, TelegramClientService>();
-	private static readonly messageHandlers = new Map<
+	private static readonly eventHandlers = new Map<
 		string,
-		IncomingMessageHandler
-	>();
-	private static readonly reactionHandlers = new Map<
-		string,
-		IncomingReactionHandler
+		IncomingEventHandler
 	>();
 
 	// ── Instance State ─────────────────────────────────────────────────
@@ -95,16 +90,7 @@ export class TelegramClientService implements TelegramClientInterface {
 		TelegramClientService.pool.set(sessionId, client);
 
 		if (telegramUserId) {
-			TelegramClientService.startMessageHandler(
-				sessionId,
-				client,
-				telegramUserId,
-			);
-			TelegramClientService.startReactionHandler(
-				sessionId,
-				client,
-				telegramUserId,
-			);
+			TelegramClientService.startEventHandler(sessionId, client, telegramUserId);
 		}
 	}
 
@@ -132,8 +118,7 @@ export class TelegramClientService implements TelegramClientInterface {
 	 * can distinguish between a valid logout and an invalid/foreign session.
 	 */
 	static async invalidate(sessionId: string): Promise<boolean> {
-		TelegramClientService.stopMessageHandler(sessionId);
-		TelegramClientService.stopReactionHandler(sessionId);
+		TelegramClientService.stopEventHandler(sessionId);
 
 		const result = await DatabaseClient.getInstance().execute(
 			(prisma) =>
@@ -209,52 +194,31 @@ export class TelegramClientService implements TelegramClientInterface {
 
 	// ── Static: Private Helpers ────────────────────────────────────────
 
-	private static startMessageHandler(
+	private static startEventHandler(
 		sessionId: string,
 		client: TelegramClientService,
 		telegramUserId: string,
 	): void {
-		const handler = new IncomingMessageHandler(
+		const handler = new IncomingEventHandler(
 			client.getClient(),
 			telegramUserId,
 			sessionId,
 		);
-		TelegramClientService.messageHandlers.set(sessionId, handler);
+		TelegramClientService.eventHandlers.set(sessionId, handler);
 
 		handler.start().catch((error) => {
 			console.error(
-				`Failed to start message handler for user ${telegramUserId}:`,
+				`Failed to start event handler for user ${telegramUserId}:`,
 				error,
 			);
 		});
 	}
 
-	private static stopMessageHandler(sessionId: string): void {
-		const handler = TelegramClientService.messageHandlers.get(sessionId);
+	private static stopEventHandler(sessionId: string): void {
+		const handler = TelegramClientService.eventHandlers.get(sessionId);
 		if (handler) {
 			handler.stop();
-			TelegramClientService.messageHandlers.delete(sessionId);
-		}
-	}
-
-	private static startReactionHandler(
-		sessionId: string,
-		client: TelegramClientService,
-		telegramUserId: string,
-	): void {
-		const handler = new IncomingReactionHandler(
-			client.getClient(),
-			telegramUserId,
-		);
-		TelegramClientService.reactionHandlers.set(sessionId, handler);
-		handler.start();
-	}
-
-	private static stopReactionHandler(sessionId: string): void {
-		const handler = TelegramClientService.reactionHandlers.get(sessionId);
-		if (handler) {
-			handler.stop();
-			TelegramClientService.reactionHandlers.delete(sessionId);
+			TelegramClientService.eventHandlers.delete(sessionId);
 		}
 	}
 

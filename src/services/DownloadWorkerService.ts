@@ -241,29 +241,57 @@ export class DownloadWorkerService {
 						select: { id: true, message_id: true },
 					});
 
-				if (attachments.length > 0) {
-					await tx.attachment.updateMany({
-						where: { file_unique_id: task.file_unique_id },
-						data: { file_url: fileUrl },
+				if (attachments.length === 0) return;
+
+				await tx.attachment.updateMany({
+					where: { file_unique_id: task.file_unique_id },
+					data: { file_url: fileUrl },
+				});
+
+				const messageIds = [...new Set(attachments.map((a) => a.message_id))];
+
+				for (const msgId of messageIds) {
+					const allAttachments = await tx.attachment.findMany({
+						where: { message_id: msgId },
+						select: {
+							file_unique_id: true,
+							file_type: true,
+							file_url: true,
+						},
 					});
 
-					const messageIds = [...new Set(attachments.map((a) => a.message_id))];
+					const pendingCount = allAttachments.filter(
+						(a) => a.file_url === null,
+					).length;
 
-					for (const msgId of messageIds) {
-						const pendingCount = await tx.attachment.count({
-							where: {
-								message_id: msgId,
-								file_url: null,
-							},
-						});
+					// Patch the raw_payload attachments array with the latest URLs
+					const msgRow = await tx.message.findUnique({
+						where: { id: msgId },
+						select: { raw_payload: true },
+					});
 
-						if (pendingCount === 0) {
-							await tx.message.update({
-								where: { id: msgId },
-								data: { status: "downloaded" },
-							});
+					let updatedPayload: string | null = msgRow?.raw_payload ?? null;
+					if (msgRow?.raw_payload) {
+						try {
+							const parsed = JSON.parse(msgRow.raw_payload);
+							parsed.attachments = allAttachments.map((a) => ({
+								file_unique_id: a.file_unique_id,
+								file_type: a.file_type,
+								url: a.file_url,
+							}));
+							updatedPayload = JSON.stringify(parsed);
+						} catch {
+							// Leave raw_payload unchanged if parsing fails
 						}
 					}
+
+					await tx.message.update({
+						where: { id: msgId },
+						data: {
+							...(pendingCount === 0 ? { status: "downloaded" } : {}),
+							raw_payload: updatedPayload,
+						},
+					});
 				}
 			});
 		});
