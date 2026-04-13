@@ -15,5 +15,5 @@ ALTER TABLE "tenant_message_state"
 -- telegram_sessions.id integer instead of the long GramJS session string.
 -- Existing rows are cleared because the old string values cannot be cast.
 ALTER TABLE "download_tasks"
-    ALTER COLUMN "from_accounts" TYPE INTEGER[]
-        USING ARRAY[]::INTEGER[];
+    ALTER COLUMN "from_accounts" TYPE BIGINT[]
+        USING ARRAY[]::BIGINT[];

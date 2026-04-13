@@ -53,10 +53,10 @@ export class TenantForwardingScheduler {
 						},
 						select: { session_id: true },
 						distinct: ["session_id"],
-					}) as Promise<{ session_id: number }[]>,
-			);
+				}) as Promise<{ session_id: bigint }[]>,
+		);
 
-			await Promise.all(rows.map((r) => this.processSession(r.session_id)));
+		await Promise.all(rows.map((r) => this.processSession(r.session_id)));
 		} catch (error) {
 			console.error("[ForwardingScheduler] Tick error:", error);
 		} finally {
@@ -64,7 +64,7 @@ export class TenantForwardingScheduler {
 		}
 	}
 
-	private async processSession(sessionId: number): Promise<void> {
+	private async processSession(sessionId: bigint): Promise<void> {
 		try {
 			const db = DatabaseClient.getInstance();
 
@@ -127,7 +127,7 @@ export class TenantForwardingScheduler {
 	 *  - The HTTP POST to the callback URL failed — will be retried next tick
 	 */
 	private async forwardNext(
-		sessionId: number,
+		sessionId: bigint,
 		lastForwardedId: bigint,
 		callbackUrl: string,
 	): Promise<bigint | null> {

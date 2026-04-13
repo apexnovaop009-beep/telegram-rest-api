@@ -15,7 +15,7 @@ datasource db {
 }
 
 model TelegramSession {
-  id                    Int                  @id @default(autoincrement())
+  id                    BigInt               @id @default(autoincrement())
   session_id            String               @db.Text
   telegram_user_id      String               @db.VarChar(255)
   telegram_username     String               @db.VarChar(255)
@@ -48,7 +48,7 @@ enum DownloadTaskStatus {
 
 model Message {
   id          BigInt        @id @default(autoincrement())
-  session_id  Int
+  session_id  BigInt
   raw_payload String?       @db.Text
   status      MessageStatus @default(pending)
   created_at  DateTime      @default(now())
@@ -74,26 +74,29 @@ model Attachment {
 }
 
 model DownloadTask {
-  id             BigInt             @id @default(autoincrement())
-  file_unique_id String             @unique @db.Text
-  status         DownloadTaskStatus @default(pending)
-  file_path      String?            @db.Text
-  file_url       String?            @db.Text
-  file_type      String?            @db.VarChar(50)
-  raw_input_json String?            @db.Text
-  from_accounts  Int[]
-  retry_count    Int                @default(0)
-  started_at     DateTime?
-  worker_id      String?            @db.VarChar(255)
-  created_at     DateTime           @default(now())
+  id               BigInt             @id @default(autoincrement())
+  file_unique_id   String             @unique @db.Text
+  status           DownloadTaskStatus @default(pending)
+  file_path        String?            @db.Text
+  file_url         String?            @db.Text
+  file_type        String?            @db.VarChar(50)
+  raw_input_json   String?            @db.Text
+  from_accounts    BigInt[]
+  owner_session_id BigInt?
+  server_name      String?            @db.VarChar(255)
+  retry_count      Int                @default(0)
+  started_at       DateTime?
+  worker_id        String?            @db.VarChar(255)
+  created_at       DateTime           @default(now())
 
   @@index([status, created_at])
+  @@index([server_name, status, created_at])
   @@map("download_tasks")
 }
 
 model TenantMessageState {
-  id                Int      @id @default(autoincrement())
-  session_id        Int      @unique
+  id                BigInt   @id @default(autoincrement())
+  session_id        BigInt   @unique
   last_forwarded_id BigInt   @default(0)
   updated_at        DateTime @updatedAt
   session           TelegramSession @relation(fields: [session_id], references: [id], onDelete: Cascade)

@@ -23,7 +23,7 @@ CREATE TABLE "telegram_sessions" (
 -- CreateTable
 CREATE TABLE "messages" (
     "id" BIGSERIAL NOT NULL,
-    "session_id" INTEGER NOT NULL,
+    "session_id" BIGINT NOT NULL,
     "telegram_chat_id" TEXT NOT NULL,
     "telegram_message_id" INTEGER NOT NULL,
     "from_account" TEXT NOT NULL,
@@ -58,7 +58,7 @@ CREATE TABLE "download_tasks" (
     "file_url" TEXT,
     "file_type" VARCHAR(50),
     "raw_input_json" TEXT,
-    "from_accounts" TEXT[],
+    "from_accounts" BIGINT[],
     "retry_count" INTEGER NOT NULL DEFAULT 0,
     "started_at" TIMESTAMP(3),
     "worker_id" VARCHAR(255),
@@ -70,7 +70,7 @@ CREATE TABLE "download_tasks" (
 -- CreateTable
 CREATE TABLE "tenant_message_state" (
     "id" BIGSERIAL NOT NULL,
-    "session_id" INTEGER NOT NULL,
+    "session_id" BIGINT NOT NULL,
     "from_account" TEXT NOT NULL,
     "to_account" TEXT NOT NULL,
     "last_forwarded_id" BIGINT NOT NULL DEFAULT 0,

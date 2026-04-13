@@ -27,5 +27,4 @@ services:
       - /app/node_modules
     profiles:
       - development
-    network_mode: "bridge" # use the default bridge network to connect to the db service (For development purposes)
     command: sh -c "npm install && npm run dev"

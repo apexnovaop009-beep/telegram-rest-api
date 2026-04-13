@@ -2,11 +2,29 @@ import { Api } from "telegram";
 import * as fs from "fs";
 import * as path from "path";
 import bigInt from "big-integer";
-import { Prisma } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { TelegramClientService } from "../telegram/TelegramClientService";
 import { SessionStatus } from "../database/constants/SessionStatus";
-import { RawInput, DownloadTaskRow } from "./interface/DownloadTask";
+import {
+	RawInput,
+	RawInputPhoto,
+	RawInputDocument,
+	RawInputChatPhoto,
+	DownloadTaskRow,
+} from "./interface/DownloadTask";
+
+/**
+ * Thrown for failures where retrying will never succeed (e.g. deleted message,
+ * lost peer access). Bypasses the normal retry counter and goes straight to
+ * a permanent "failed" status.
+ */
+class PermanentDownloadError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "PermanentDownloadError";
+	}
+}
 
 const MAX_CONCURRENT = parseInt(
 	process.env.MAX_CONCURRENT_DOWNLOADS ?? "5",
@@ -79,21 +97,28 @@ export class DownloadWorkerService {
 				    worker_id = ${WORKER_ID}
 				WHERE id = (
 					SELECT id FROM download_tasks
-				WHERE status = 'pending'
-			AND from_accounts && COALESCE(
-				(
-					SELECT ARRAY_AGG(ts.id)::INTEGER[]
-					FROM telegram_sessions ts
-					WHERE ts.server_name = ${SERVER_NAME}
-					AND ts.status = ${SessionStatus.ACTIVE}
-				),
-				ARRAY[]::INTEGER[]
-			)
+					WHERE status = 'pending'
+					AND (
+						server_name = ${SERVER_NAME}
+						OR (
+							server_name IS NULL
+							AND from_accounts && COALESCE(
+								(
+									SELECT ARRAY_AGG(ts.id)::BIGINT[]
+									FROM telegram_sessions ts
+									WHERE ts.server_name = ${SERVER_NAME}
+									AND ts.status = ${SessionStatus.ACTIVE}
+								),
+								ARRAY[]::INTEGER[]
+							)
+						)
+					)
 					ORDER BY created_at ASC
 					LIMIT 1
 					FOR UPDATE SKIP LOCKED
 				)
-				RETURNING id, file_unique_id, raw_input_json, from_accounts, file_type
+				RETURNING id, file_unique_id, raw_input_json, from_accounts,
+				          file_type, owner_session_id
 			`,
 		);
 		return rows.length > 0 ? rows[0] : null;
@@ -106,7 +131,10 @@ export class DownloadWorkerService {
 			}
 
 			const rawInput: RawInput = JSON.parse(task.raw_input_json);
-			const client = await this.pickClient(task.from_accounts);
+			const client = await this.pickClient(
+				task.owner_session_id,
+				task.from_accounts,
+			);
 			if (!client) {
 				throw new Error(`No available Telegram client for task ${task.id}`);
 			}
@@ -135,11 +163,12 @@ export class DownloadWorkerService {
 
 			console.log(`[DownloadWorker] Completed task ${task.id} → ${fileName}`);
 		} catch (error) {
+			const isPermanent = error instanceof PermanentDownloadError;
 			console.error(
-				`[DownloadWorker] Failed task ${task.id}:`,
+				`[DownloadWorker] Failed task ${task.id}${isPermanent ? " (permanent)" : ""}:`,
 				error instanceof Error ? error.message : error,
 			);
-			await this.markFailed(task);
+			await this.markFailed(task, isPermanent);
 		}
 	}
 
@@ -168,14 +197,21 @@ export class DownloadWorkerService {
 	}
 
 	private async pickClient(
-		fromAccounts: number[],
+		ownerSessionId: bigint | null,
+		fromAccounts: bigint[],
 	): Promise<TelegramClientService | undefined> {
 		const db = DatabaseClient.getInstance();
+
+		// raw_input_json contains account-specific data (fileReference, accessHash,
+		// messageId) — only the owning account can use it. Fall back to the full
+		// list only for legacy tasks created before owner_session_id was stored.
+		const accountIds = ownerSessionId ? [ownerSessionId] : fromAccounts;
+
 		const sessions = await db.execute(
 			(prisma) =>
 				prisma.telegramSession.findMany({
 					where: {
-						id: { in: fromAccounts },
+						id: { in: accountIds },
 						status: SessionStatus.ACTIVE,
 					},
 					select: { session_id: true },
@@ -193,7 +229,43 @@ export class DownloadWorkerService {
 		clientService: TelegramClientService,
 		rawInput: RawInput,
 	): Promise<Buffer> {
+		try {
+			return await this.attemptDownload(clientService, rawInput);
+		} catch (err) {
+			if (
+				this.isFileReferenceExpired(err) &&
+				rawInput.type !== "chat_photo"
+			) {
+				console.log(
+					`[DownloadWorker] File reference expired — re-fetching message ${rawInput.messageId}`,
+				);
+				const refreshed = await this.refreshFileReference(
+					clientService,
+					rawInput,
+				);
+				return await this.attemptDownload(clientService, refreshed);
+			}
+			throw err;
+		}
+	}
+
+	private async attemptDownload(
+		clientService: TelegramClientService,
+		rawInput: RawInput,
+	): Promise<Buffer> {
 		const client = clientService.getClient();
+
+		if (rawInput.type === "chat_photo") {
+			const location = new Api.InputPeerPhotoFileLocation({
+				peer: await this.resolveInputPeer(clientService, rawInput),
+				photoId: bigInt(rawInput.photoId),
+				big: true,
+			});
+			const result = await client.downloadFile(location, {
+				dcId: rawInput.dcId,
+			});
+			return this.toBuffer(result);
+		}
 
 		if (rawInput.type === "photo") {
 			const location = new Api.InputPhotoFileLocation({
@@ -202,7 +274,6 @@ export class DownloadWorkerService {
 				fileReference: Buffer.from(rawInput.fileReference, "base64"),
 				thumbSize: rawInput.thumbSize || "x",
 			});
-
 			const result = await client.downloadFile(location, {
 				dcId: rawInput.dcId,
 			});
@@ -215,11 +286,98 @@ export class DownloadWorkerService {
 			fileReference: Buffer.from(rawInput.fileReference, "base64"),
 			thumbSize: rawInput.thumbSize || "",
 		});
-
 		const result = await client.downloadFile(location, {
 			dcId: rawInput.dcId,
 		});
 		return this.toBuffer(result);
+	}
+
+	private isFileReferenceExpired(err: unknown): boolean {
+		return (
+			err instanceof Error &&
+			err.message.includes("FILE_REFERENCE_EXPIRED")
+		);
+	}
+
+	private async refreshFileReference(
+		clientService: TelegramClientService,
+		rawInput: RawInputPhoto | RawInputDocument,
+	): Promise<RawInputPhoto | RawInputDocument> {
+		const client = clientService.getClient();
+
+		let peer: Api.TypeInputPeer;
+		if (rawInput.peerType === "chat") {
+			peer = new Api.InputPeerChat({ chatId: bigInt(rawInput.peerId) });
+		} else {
+			const apiPeer =
+				rawInput.peerType === "channel"
+					? new Api.PeerChannel({ channelId: bigInt(rawInput.peerId) })
+					: new Api.PeerUser({ userId: bigInt(rawInput.peerId) });
+			peer = (await client.getInputEntity(apiPeer)) as Api.TypeInputPeer;
+		}
+
+		const messages = await client.getMessages(peer, {
+			ids: [rawInput.messageId],
+		});
+		const msg = messages[0];
+		if (!msg || !(msg instanceof Api.Message)) {
+			throw new PermanentDownloadError(
+				`Message ${rawInput.messageId} not found while refreshing file reference — likely deleted`,
+			);
+		}
+
+		if (
+			rawInput.type === "photo" &&
+			msg.media instanceof Api.MessageMediaPhoto &&
+			msg.media.photo instanceof Api.Photo
+		) {
+			return {
+				...rawInput,
+				fileReference: Buffer.from(
+					msg.media.photo.fileReference,
+				).toString("base64"),
+			};
+		}
+
+		if (
+			rawInput.type === "document" &&
+			msg.media instanceof Api.MessageMediaDocument &&
+			msg.media.document instanceof Api.Document
+		) {
+			return {
+				...rawInput,
+				fileReference: Buffer.from(
+					msg.media.document.fileReference,
+				).toString("base64"),
+			};
+		}
+
+		throw new PermanentDownloadError(
+			`Could not extract fresh file reference from message ${rawInput.messageId} — media type mismatch or media removed`,
+		);
+	}
+
+	/**
+	 * Resolves an InputPeer for a chat photo download.
+	 * Regular groups (chat) need only the chatId.
+	 * Channels/supergroups need the accessHash, resolved from the client's
+	 * entity cache (always present since we received a message from the peer).
+	 */
+	private async resolveInputPeer(
+		clientService: TelegramClientService,
+		rawInput: RawInputChatPhoto,
+	): Promise<Api.TypeInputPeer> {
+		if (rawInput.peerType === "chat") {
+			return new Api.InputPeerChat({ chatId: bigInt(rawInput.peerId) });
+		}
+
+		const client = clientService.getClient();
+		const peer =
+			rawInput.peerType === "channel"
+				? new Api.PeerChannel({ channelId: bigInt(rawInput.peerId) })
+				: new Api.PeerUser({ userId: bigInt(rawInput.peerId) });
+
+		return (await client.getInputEntity(peer)) as Api.TypeInputPeer;
 	}
 
 	private async markCompleted(
@@ -274,20 +432,38 @@ export class DownloadWorkerService {
 						select: { raw_payload: true },
 					});
 
-					let updatedPayload: string | null = msgRow?.raw_payload ?? null;
-					if (msgRow?.raw_payload) {
-						try {
-							const parsed = JSON.parse(msgRow.raw_payload);
-							parsed.attachments = allAttachments.map((a) => ({
-								file_unique_id: a.file_unique_id,
-								file_type: a.file_type,
-								url: a.file_url,
-							}));
-							updatedPayload = JSON.stringify(parsed);
-						} catch {
-							// Leave raw_payload unchanged if parsing fails
-						}
+				let updatedPayload: string | null = msgRow?.raw_payload ?? null;
+				if (msgRow?.raw_payload) {
+					try {
+						const parsed = JSON.parse(msgRow.raw_payload);
+
+						const chatPhoto = allAttachments.find(
+							(a) => a.file_type === "chat_photo",
+						);
+						const regular = allAttachments.filter(
+							(a) => a.file_type !== "chat_photo",
+						);
+
+					if (chatPhoto?.file_url) {
+						parsed.image_link = chatPhoto.file_url;
 					}
+					if (regular.length > 0) {
+						parsed.attachments = regular.map((a) => ({
+							file_unique_id: a.file_unique_id,
+							file_type: a.file_type,
+							url: a.file_url,
+						}));
+					}
+
+					if (pendingCount === 0) {
+						parsed.download_failed = false;
+					}
+
+					updatedPayload = JSON.stringify(parsed);
+					} catch {
+						// Leave raw_payload unchanged if parsing fails
+					}
+				}
 
 					await tx.message.update({
 						where: { id: msgId },
@@ -301,7 +477,10 @@ export class DownloadWorkerService {
 		});
 	}
 
-	private async markFailed(task: DownloadTaskRow): Promise<void> {
+	private async markFailed(
+		task: DownloadTaskRow,
+		permanent = false,
+	): Promise<void> {
 		const db = DatabaseClient.getInstance();
 		await db.execute(async (prisma) => {
 			const current = await prisma.downloadTask.findUnique({
@@ -310,7 +489,8 @@ export class DownloadWorkerService {
 			});
 
 			const retryCount = (current?.retry_count ?? 0) + 1;
-			const newStatus = retryCount >= MAX_RETRIES ? "failed" : "pending";
+			const isPermanentFail = permanent || retryCount >= MAX_RETRIES;
+			const newStatus = isPermanentFail ? "failed" : "pending";
 
 			await prisma.downloadTask.update({
 				where: { id: task.id },
@@ -321,7 +501,79 @@ export class DownloadWorkerService {
 					worker_id: null,
 				},
 			});
+
+			if (isPermanentFail) {
+				await this.resolveBlockedMessages(prisma, task.file_unique_id);
+			}
 		});
+	}
+
+	/**
+	 * When a download is permanently failed, find every message that was
+	 * waiting on that file. If all of the message's other attachments are
+	 * also resolved (completed or failed), there is nothing left to wait for
+	 * — mark the message `downloaded` with `download_failed: true` in its
+	 * payload so the forwarding scheduler unblocks and the callback
+	 * receives the event with the failure flag set.
+	 */
+	private async resolveBlockedMessages(
+		prisma: PrismaClient,
+		fileUniqueId: string,
+	): Promise<void> {
+		const affected = await prisma.attachment.findMany({
+			where: { file_unique_id: fileUniqueId },
+			select: { message_id: true },
+		});
+
+		const messageIds = [...new Set(affected.map((a) => a.message_id))];
+		if (messageIds.length === 0) return;
+
+		for (const msgId of messageIds) {
+			const msg = await prisma.message.findUnique({
+				where: { id: msgId },
+				select: { status: true, raw_payload: true },
+			});
+
+			if (!msg || msg.status !== "pending") continue;
+
+			const siblings = await prisma.attachment.findMany({
+				where: { message_id: msgId },
+				select: { file_unique_id: true },
+			});
+
+			const siblingTasks = await prisma.downloadTask.findMany({
+				where: {
+					file_unique_id: { in: siblings.map((s) => s.file_unique_id) },
+				},
+				select: { status: true },
+			});
+
+			const allResolved = siblingTasks.every(
+				(t) => t.status === "completed" || t.status === "failed",
+			);
+
+			if (!allResolved) continue;
+
+			let updatedPayload: string | null = msg.raw_payload ?? null;
+			if (msg.raw_payload) {
+				try {
+					const parsed = JSON.parse(msg.raw_payload);
+					parsed.download_failed = true;
+					updatedPayload = JSON.stringify(parsed);
+				} catch {
+					// Leave raw_payload unchanged if parsing fails
+				}
+			}
+
+			await prisma.message.update({
+				where: { id: msgId },
+				data: { status: "downloaded", raw_payload: updatedPayload },
+			});
+
+			console.warn(
+				`[DownloadWorker] Message ${msgId} finalised with download_failed=true — ${fileUniqueId} exhausted all retries`,
+			);
+		}
 	}
 
 	/**
@@ -377,7 +629,7 @@ export class DownloadWorkerService {
 	}
 
 	private inferExtension(rawInput: RawInput): string {
-		if (rawInput.type === "photo") return "jpg";
+		if (rawInput.type === "photo" || rawInput.type === "chat_photo") return "jpg";
 		const mime = rawInput.mimeType ?? "";
 		if (rawInput.fileName) {
 			const parts = rawInput.fileName.split(".");

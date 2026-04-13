@@ -1,14 +1,34 @@
 import { Api, TelegramClient } from "telegram";
-import { NewMessage, NewMessageEvent, Raw } from "telegram/events";
+import { Raw } from "telegram/events";
+import { UpdateConnectionState } from "telegram/network";
 import { Prisma } from "@prisma/client";
 import { DatabaseClient } from "../database/DatabaseClient";
 
-const ALBUM_BUFFER_MS = parseInt(process.env.ALBUM_BUFFER_MS ?? "300", 10);
 const INIT_DELAY_MS = 5000;
+const SERVER_NAME = process.env.SERVER_NAME ?? "";
 
-interface AlbumEntry {
-	events: NewMessageEvent[];
-	timer: NodeJS.Timeout;
+function patchPayloadWithMedia(
+	parsed: Record<string, unknown>,
+	mediaList: ParsedMedia[],
+	urls: string[],
+): void {
+	const chatPhoto = mediaList.find((m) => m.fileType === "chat_photo");
+	if (chatPhoto) {
+		parsed.image_link = urls[mediaList.indexOf(chatPhoto)];
+	}
+
+	const regular = mediaList.filter((m) => m.fileType !== "chat_photo");
+	if (regular.length > 0) {
+		parsed.attachments = regular.map((m) => ({
+			file_unique_id: m.fileUniqueId,
+			file_type: m.fileType,
+			url: urls[mediaList.indexOf(m)],
+		}));
+	}
+
+	// This function is only called when every URL is already resolved,
+	// meaning all downloads completed successfully.
+	parsed.download_failed = false;
 }
 
 interface ParsedMedia {
@@ -17,26 +37,12 @@ interface ParsedMedia {
 	rawInputJson: string;
 }
 
-/**
- * Unified handler for all incoming Telegram events on a single user session.
- *
- * Responsibilities:
- *  - New messages (including album batches) → stored with attachment download tasks
- *  - Edit messages → stored with attachment download tasks (same dedup logic)
- *  - Delete, reaction, participant, pin events → stored directly as raw_payload
- *
- * After a file is downloaded, DownloadWorkerService patches the `attachments`
- * key on the associated message's raw_payload automatically.
- */
 export class IncomingEventHandler {
 	private readonly client: TelegramClient;
 	private readonly telegramUserId: string;
 	private readonly sessionId: string;
 
-	private newMessageHandler: ((event: NewMessageEvent) => void) | null = null;
 	private rawHandler: ((update: Api.TypeUpdate) => void) | null = null;
-
-	private readonly albumBuffers = new Map<string, AlbumEntry>();
 
 	constructor(
 		client: TelegramClient,
@@ -49,18 +55,10 @@ export class IncomingEventHandler {
 	}
 
 	async start(): Promise<void> {
-		this.newMessageHandler = (event: NewMessageEvent) => {
-			this.bufferNewMessage(event);
-		};
-
 		this.rawHandler = (update: Api.TypeUpdate) => {
 			this.handleRawUpdate(update);
 		};
 
-		this.client.addEventHandler(
-			this.newMessageHandler,
-			new NewMessage({ incoming: true }),
-		);
 		this.client.addEventHandler(this.rawHandler, new Raw({}));
 
 		await this.delay(INIT_DELAY_MS);
@@ -75,120 +73,106 @@ export class IncomingEventHandler {
 	}
 
 	stop(): void {
-		if (this.newMessageHandler) {
-			this.client.removeEventHandler(
-				this.newMessageHandler,
-				new NewMessage({ incoming: true }),
-			);
-			this.newMessageHandler = null;
-		}
 		if (this.rawHandler) {
 			this.client.removeEventHandler(this.rawHandler, new Raw({}));
 			this.rawHandler = null;
 		}
-		for (const [, entry] of this.albumBuffers) {
-			clearTimeout(entry.timer);
-		}
-		this.albumBuffers.clear();
 	}
 
-	// ── Album Buffer ─────────────────────────────────────────────────────
-
-	/**
-	 * Buffers messages that share a `grouped_id` (albums) and flushes them
-	 * as a batch after a short debounce window.  Non-grouped messages are
-	 * flushed immediately as single-element batches.
-	 */
-	private bufferNewMessage(event: NewMessageEvent): void {
-		const groupedId = event.message.groupedId?.toString();
-
-		if (!groupedId) {
-			this.persistNewMessageBatch([event]).catch((err) =>
-				console.error("[EventHandler] Error persisting message:", err),
-			);
+	private handleRawUpdate(update: Api.TypeUpdate): void {
+		// Block these events from being persisted
+		if (
+			update instanceof Api.UpdateUserTyping ||
+			update instanceof Api.UpdateChatUserTyping ||
+			update instanceof UpdateConnectionState ||
+			update instanceof Api.UpdateUserStatus
+		) {
 			return;
 		}
 
-		const existing = this.albumBuffers.get(groupedId);
-		if (existing) {
-			clearTimeout(existing.timer);
-			existing.events.push(event);
-		} else {
-			this.albumBuffers.set(groupedId, { events: [event], timer: null! });
-		}
-
-		const entry = this.albumBuffers.get(groupedId)!;
-		entry.timer = setTimeout(() => {
-			const buffered = this.albumBuffers.get(groupedId);
-			if (!buffered) return;
-			this.albumBuffers.delete(groupedId);
-			this.persistNewMessageBatch(buffered.events).catch((err) =>
-				console.error("[EventHandler] Error persisting album batch:", err),
-			);
-		}, ALBUM_BUFFER_MS);
-	}
-
-	// ── New Message Persistence ──────────────────────────────────────────
-
-	/**
-	 * Each message in the batch (including album members) is stored as its own
-	 * row so that raw_payload is exactly the Telegram message object.
-	 */
-	private async persistNewMessageBatch(
-		events: NewMessageEvent[],
-	): Promise<void> {
-		const sessionRecordId = await this.resolveSessionRecordId();
-		if (sessionRecordId === null) {
-			console.error(
-				`[EventHandler] No active session record found for ${this.sessionId}`,
-			);
-			return;
-		}
-
-		for (const event of events) {
-			const media = this.extractMedia(event.message);
-			const rawPayload = this.serializeBigInt(event.message);
-			await this.persistMessageWithMedia(
-				sessionRecordId,
-				rawPayload,
-				media ? [media] : [],
-			);
-		}
-	}
-
-	// ── Edit Message Persistence ─────────────────────────────────────────
-
-	private async persistEditMessage(
-		update: Api.UpdateEditMessage | Api.UpdateEditChannelMessage,
-	): Promise<void> {
-		const sessionRecordId = await this.resolveSessionRecordId();
-		if (sessionRecordId === null) return;
-
-		const message = update.message as Api.Message;
-		const media = this.extractMedia(message);
-		const rawPayload = this.serializeBigInt(message);
-
-		await this.persistMessageWithMedia(
-			sessionRecordId,
-			rawPayload,
-			media ? [media] : [],
+		this.persistUpdate(update).catch((err) =>
+			console.error("[EventHandler] Error persisting update:", err),
 		);
 	}
 
-	// ── Shared: Message + Attachment Download Task ───────────────────────
+	private async persistUpdate(update: Api.TypeUpdate): Promise<void> {
+		const sessionRecord = await this.resolveSessionRecord();
+		if (sessionRecord === null) return;
+
+		const mediaList = this.extractMediaFromUpdate(update);
+		const payload = this.extractSerializablePayload(update);
+		const serialized = this.serializeBigInt(payload);
+		const parsed = JSON.parse(serialized) as Record<string, unknown>;
+		parsed.receiverId = {
+			userId: sessionRecord.telegram_user_id,
+			className: "PeerUser",
+		};
+		const rawPayload = JSON.stringify(parsed);
+
+		await this.persistMessageWithMedia(sessionRecord.id, rawPayload, mediaList);
+	}
 
 	/**
-	 * Creates a message row, links attachment rows, and upserts download tasks.
-	 *
-	 * Dedup behaviour:
-	 *  - Task already completed → reuse file_url immediately, mark downloaded
-	 *  - Task pending / processing → add this session to from_accounts so any
-	 *    active worker can use it; DownloadWorkerService patches the payload
-	 *    once complete
-	 *  - Task does not exist → create it
+	 * Raw updates that carry a `.message` hold circular refs back to the
+	 * TelegramClient. Extract just the message for those; other update
+	 * types (deletes, reactions, etc.) are safe to serialize directly.
 	 */
+	private extractSerializablePayload(update: Api.TypeUpdate): unknown {
+		if (
+			(update instanceof Api.UpdateNewMessage ||
+				update instanceof Api.UpdateNewChannelMessage ||
+				update instanceof Api.UpdateEditMessage ||
+				update instanceof Api.UpdateEditChannelMessage) &&
+			update.message
+		) {
+			return update.message;
+		}
+		return update;
+	}
+
+	private extractMediaFromUpdate(update: Api.TypeUpdate): ParsedMedia[] {
+		const message = this.extractMessageFromUpdate(update);
+		if (!message) return [];
+
+		if (message instanceof Api.MessageService) {
+			const { action } = message;
+			if (
+				action instanceof Api.MessageActionChatEditPhoto &&
+				action.photo instanceof Api.Photo
+			) {
+				return [this.extractChatPhoto(action.photo, message)];
+			}
+			return [];
+		}
+
+		if (message instanceof Api.Message) {
+			const media = this.extractMedia(message);
+			return media ? [media] : [];
+		}
+
+		return [];
+	}
+
+	private extractMessageFromUpdate(
+		update: Api.TypeUpdate,
+	): Api.Message | Api.MessageService | null {
+		if (
+			(update instanceof Api.UpdateNewMessage ||
+				update instanceof Api.UpdateNewChannelMessage ||
+				update instanceof Api.UpdateEditMessage ||
+				update instanceof Api.UpdateEditChannelMessage) &&
+			(update.message instanceof Api.Message ||
+				update.message instanceof Api.MessageService)
+		) {
+			return update.message;
+		}
+		return null;
+	}
+
+	// ── Persistence ─────────────────────────────────────────────────────
+
 	private async persistMessageWithMedia(
-		sessionRecordId: number,
+		sessionRecordId: bigint,
 		rawPayload: string,
 		mediaList: ParsedMedia[],
 	): Promise<void> {
@@ -210,29 +194,53 @@ export class IncomingEventHandler {
 				const resolvedUrls: (string | null)[] = [];
 
 				for (const media of mediaList) {
-					const existingTask = await tx.downloadTask.findUnique({
+					const existing = await tx.downloadTask.findUnique({
 						where: { file_unique_id: media.fileUniqueId },
 					});
 
-					let fileUrl: string | null = null;
-
-					if (existingTask?.status === "completed") {
-						fileUrl = existingTask.file_url ?? null;
-					} else if (!existingTask) {
-						await tx.downloadTask.create({
+					let task;
+					if (!existing) {
+						task = await tx.downloadTask.create({
 							data: {
 								file_unique_id: media.fileUniqueId,
 								file_type: media.fileType,
 								raw_input_json: media.rawInputJson,
 								from_accounts: [sessionRecordId],
+								owner_session_id: sessionRecordId,
+								server_name: SERVER_NAME,
 							},
 						});
-					} else if (!existingTask.from_accounts.includes(sessionRecordId)) {
-						// Let an already-running worker serve this session too
-						await tx.downloadTask.update({
-							where: { file_unique_id: media.fileUniqueId },
-							data: { from_accounts: { push: sessionRecordId } },
+					} else if (existing.status === "failed") {
+						task = await tx.downloadTask.update({
+							where: { id: existing.id },
+							data: {
+								status: "pending",
+								retry_count: 0,
+								raw_input_json: media.rawInputJson,
+								owner_session_id: sessionRecordId,
+								server_name: SERVER_NAME,
+								started_at: null,
+								worker_id: null,
+								...(existing.from_accounts.includes(sessionRecordId)
+									? {}
+									: { from_accounts: { push: sessionRecordId } }),
+							},
 						});
+					} else {
+						// Pending / processing / completed — never overwrite raw_input_json;
+						// the existing data is tied to a specific account's fileReference,
+						// accessHash, and messageId.
+						task = existing.from_accounts.includes(sessionRecordId)
+							? existing
+							: await tx.downloadTask.update({
+									where: { id: existing.id },
+									data: { from_accounts: { push: sessionRecordId } },
+								});
+					}
+
+					let fileUrl: string | null = null;
+					if (task.status === "completed") {
+						fileUrl = task.file_url ?? null;
 					}
 
 					await tx.attachment.create({
@@ -247,16 +255,11 @@ export class IncomingEventHandler {
 					resolvedUrls.push(fileUrl);
 				}
 
-				// All attachments were already downloaded — patch payload immediately
 				if (resolvedUrls.every((u) => u !== null)) {
 					let updatedPayload = rawPayload;
 					try {
 						const parsed = JSON.parse(rawPayload);
-						parsed.attachments = mediaList.map((m, i) => ({
-							file_unique_id: m.fileUniqueId,
-							file_type: m.fileType,
-							url: resolvedUrls[i],
-						}));
+						patchPayloadWithMedia(parsed, mediaList, resolvedUrls as string[]);
 						updatedPayload = JSON.stringify(parsed);
 					} catch {
 						// Leave raw_payload unchanged if JSON round-trip fails
@@ -271,78 +274,13 @@ export class IncomingEventHandler {
 		});
 	}
 
-	// ── Raw Update Dispatch ──────────────────────────────────────────────
-
-	private handleRawUpdate(update: Api.TypeUpdate): void {
-		// NewMessage is already handled by the dedicated event handler above
-		if (
-			update instanceof Api.UpdateNewMessage ||
-			update instanceof Api.UpdateNewChannelMessage
-		) {
-			return;
-		}
-
-		// Edit messages may carry attachments — handle like new messages
-		if (
-			(update instanceof Api.UpdateEditMessage ||
-				update instanceof Api.UpdateEditChannelMessage) &&
-			update.message instanceof Api.Message
-		) {
-			this.persistEditMessage(update).catch((err) =>
-				console.error("[EventHandler] Edit message error:", err),
-			);
-			return;
-		}
-
-		// Store other notable event types directly
-		if (this.isTrackedUpdate(update)) {
-			this.persistRawUpdate(update).catch((err) =>
-				console.error("[EventHandler] Raw update error:", err),
-			);
-		}
-	}
-
-	/**
-	 * Returns true for events that are worth persisting but do not require
-	 * attachment downloads:
-	 *  - Message deletion
-	 *  - Reactions
-	 *  - Group / channel participant changes (join, leave, admin change)
-	 *  - Pinned message changes
-	 */
-	private isTrackedUpdate(update: Api.TypeUpdate): boolean {
-		return (
-			update instanceof Api.UpdateDeleteMessages ||
-			update instanceof Api.UpdateDeleteChannelMessages ||
-			update instanceof Api.UpdateMessageReactions ||
-			update instanceof Api.UpdateChatParticipant ||
-			update instanceof Api.UpdateChannelParticipant ||
-			update instanceof Api.UpdatePinnedMessages ||
-			update instanceof Api.UpdatePinnedChannelMessages
-		);
-	}
-
-	private async persistRawUpdate(update: Api.TypeUpdate): Promise<void> {
-		const sessionRecordId = await this.resolveSessionRecordId();
-		if (sessionRecordId === null) return;
-
-		const db = DatabaseClient.getInstance();
-		await db.execute((prisma) =>
-			prisma.message.create({
-				data: {
-					session_id: sessionRecordId,
-					raw_payload: this.serializeBigInt(update),
-					status: "downloaded",
-				},
-			}),
-		);
-	}
-
-	// ── Media Extraction ─────────────────────────────────────────────────
+	// ── Media Extraction ────────────────────────────────────────────────
 
 	private extractMedia(msg: Api.Message): ParsedMedia | null {
 		const { media } = msg;
 		if (!media) return null;
+
+		const { peerId, peerType } = this.extractPeerInfo(msg.peerId);
 
 		if (
 			media instanceof Api.MessageMediaPhoto &&
@@ -363,6 +301,9 @@ export class IncomingEventHandler {
 					fileReference: Buffer.from(photo.fileReference).toString("base64"),
 					thumbSize: thumbType,
 					dcId: photo.dcId,
+					messageId: msg.id,
+					peerId,
+					peerType,
 				}),
 			};
 		}
@@ -388,11 +329,49 @@ export class IncomingEventHandler {
 					dcId: doc.dcId,
 					mimeType: doc.mimeType,
 					fileName: this.extractFileName(doc),
+					messageId: msg.id,
+					peerId,
+					peerType,
 				}),
 			};
 		}
 
 		return null;
+	}
+
+	private extractChatPhoto(
+		photo: Api.Photo,
+		message: Api.MessageService,
+	): ParsedMedia {
+		const { peerId, peerType } = this.extractPeerInfo(message.peerId);
+
+		return {
+			fileUniqueId: `photo_${photo.id.toString()}`,
+			fileType: "chat_photo",
+			rawInputJson: JSON.stringify({
+				type: "chat_photo",
+				photoId: photo.id.toString(),
+				peerId,
+				peerType,
+				dcId: photo.dcId,
+			}),
+		};
+	}
+
+	private extractPeerInfo(peer: Api.TypePeer): {
+		peerId: string;
+		peerType: "user" | "chat" | "channel";
+	} {
+		if (peer instanceof Api.PeerChannel) {
+			return { peerId: peer.channelId.toString(), peerType: "channel" };
+		}
+		if (peer instanceof Api.PeerChat) {
+			return { peerId: peer.chatId.toString(), peerType: "chat" };
+		}
+		return {
+			peerId: (peer as Api.PeerUser).userId.toString(),
+			peerType: "user",
+		};
 	}
 
 	private extractFileName(doc: Api.Document): string {
@@ -409,21 +388,30 @@ export class IncomingEventHandler {
 	// ── Helpers ──────────────────────────────────────────────────────────
 
 	private serializeBigInt(value: unknown): string {
-		return JSON.stringify(value, (_, v) =>
-			typeof v === "bigint" ? v.toString() : v,
-		);
+		const seen = new WeakSet();
+		return JSON.stringify(value, (k, v) => {
+			if (k === "_client") return undefined;
+			if (typeof v === "bigint") return v.toString();
+			if (typeof v === "object" && v !== null) {
+				if (seen.has(v)) return undefined;
+				seen.add(v);
+			}
+			return v;
+		});
 	}
 
-	private async resolveSessionRecordId(): Promise<number | null> {
+	private async resolveSessionRecord(): Promise<{
+		id: bigint;
+		telegram_user_id: string;
+	} | null> {
 		const db = DatabaseClient.getInstance();
-		const session = await db.execute(
+		return db.execute(
 			(prisma) =>
 				prisma.telegramSession.findFirst({
 					where: { session_id: this.sessionId, status: "active" },
-					select: { id: true },
-				}) as Promise<{ id: number } | null>,
+					select: { id: true, telegram_user_id: true },
+				}) as Promise<{ id: bigint; telegram_user_id: string } | null>,
 		);
-		return session?.id ?? null;
 	}
 
 	private delay(ms: number): Promise<void> {
