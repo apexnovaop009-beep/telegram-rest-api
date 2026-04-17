@@ -38,7 +38,13 @@ async function downloadMessageAttachments(
 			);
 			return null;
 		});
-		return [{ file_unique_id: `photo_${photo.id.toString()}`, file_type: "photo", url }];
+		return [
+			{
+				file_unique_id: `photo_${photo.id.toString()}`,
+				file_type: "photo",
+				url,
+			},
+		];
 	}
 
 	if (
@@ -60,7 +66,9 @@ async function downloadMessageAttachments(
 			);
 			return null;
 		});
-		return [{ file_unique_id: `doc_${doc.id.toString()}`, file_type: fileType, url }];
+		return [
+			{ file_unique_id: `doc_${doc.id.toString()}`, file_type: fileType, url },
+		];
 	}
 
 	return [];
@@ -442,10 +450,9 @@ export class MessageRoute extends BaseRoute {
 				};
 
 				if (!sessionId || !id?.length) {
-					return new ErrorResponse(
-						"sessionId and id are required",
-						400,
-					).send(reply);
+					return new ErrorResponse("sessionId and id are required", 400).send(
+						reply,
+					);
 				}
 
 				try {
@@ -505,18 +512,14 @@ export class MessageRoute extends BaseRoute {
 
 							// Serialize (handles BigInteger from GramJS via toJSON())
 							// then inject the downloaded attachment entries.
-							const serialized = JSON.parse(
-								JSON.stringify(rawResult),
-							) as {
+							const serialized = JSON.parse(JSON.stringify(rawResult)) as {
 								messages?: Array<Record<string, unknown>>;
 								[key: string]: unknown;
 							};
 
 							if (serialized.messages) {
 								for (const msg of serialized.messages) {
-									const entries = attachmentsMap.get(
-										msg.id as number,
-									);
+									const entries = attachmentsMap.get(msg.id as number);
 									if (entries) {
 										msg.attachments = entries;
 									}
