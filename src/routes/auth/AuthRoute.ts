@@ -349,5 +349,49 @@ export class AuthRoute extends BaseRoute {
 				}
 			},
 		);
+
+		fastify.post(
+			"/auth/UpdateSession",
+			async (request: FastifyRequest, reply: FastifyReply) => {
+				const { sessionId, callbackUrl } = request.body as {
+					sessionId: string;
+					callbackUrl: string;
+				};
+
+				if (!sessionId || !callbackUrl) {
+					return new ErrorResponse(
+						"sessionId and callbackUrl are required",
+						400,
+					).send(reply);
+				}
+
+				try {
+					const result = await DatabaseClient.getInstance().execute(
+						(prisma) =>
+							prisma.telegramSession.updateMany({
+								where: {
+									session_id: sessionId,
+									server_name: process.env.SERVER_NAME ?? "",
+								},
+								data: { callback_url: callbackUrl },
+							}),
+					);
+
+					if (result.count === 0) {
+						return new ErrorResponse(
+							"Session not found or does not belong to this server",
+							404,
+						).send(reply);
+					}
+
+					new SuccessResponse(
+						{},
+						"Callback URL updated successfully",
+					).send(reply);
+				} catch (error: unknown) {
+					ErrorResponse.fromError(error).send(reply);
+				}
+			},
+		);
 	}
 }
