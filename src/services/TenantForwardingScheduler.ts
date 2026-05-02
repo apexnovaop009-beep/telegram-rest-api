@@ -1,3 +1,4 @@
+import { PrismaClient } from "@prisma/client";
 import { DatabaseClient } from "../database/DatabaseClient";
 
 const FORWARDING_INTERVAL_MS = parseInt(
@@ -5,6 +6,15 @@ const FORWARDING_INTERVAL_MS = parseInt(
 	10,
 );
 const SERVER_NAME = process.env.SERVER_NAME ?? "";
+
+const CALLBACK_RETRY_BASE_DELAY_S = parseInt(
+	process.env.CALLBACK_RETRY_BASE_DELAY_SECONDS ?? "5",
+	10,
+);
+const CALLBACK_MAX_RETRIES = parseInt(
+	process.env.CALLBACK_MAX_RETRIES ?? "5",
+	10,
+);
 
 /**
  * Forwards messages to each session's callback URL in strict FIFO order.
@@ -16,6 +26,13 @@ const SERVER_NAME = process.env.SERVER_NAME ?? "";
  * preceding message reaches `downloaded` status.  A `pending` message
  * (attachment still in flight) stops the queue for that session until the
  * DownloadWorkerService marks it `downloaded`.
+ *
+ * Retry behaviour: when a callback POST fails the message stays `downloaded`
+ * and `next_delivery_attempt_at` is set using a linear back-off
+ * (`attempt * CALLBACK_RETRY_BASE_DELAY_S`).  After `CALLBACK_MAX_RETRIES`
+ * the message is marked `delivery_failed` and the cursor advances.
+ *
+ * Successfully delivered messages are deleted (attachments cascade).
  */
 export class TenantForwardingScheduler {
 	private timer: NodeJS.Timeout | null = null;
@@ -26,7 +43,8 @@ export class TenantForwardingScheduler {
 
 		this.timer = setInterval(() => this.tick(), FORWARDING_INTERVAL_MS);
 		console.log(
-			`[ForwardingScheduler] Started (interval: ${FORWARDING_INTERVAL_MS}ms)`,
+			`[ForwardingScheduler] Started (interval: ${FORWARDING_INTERVAL_MS}ms, ` +
+				`retryBase: ${CALLBACK_RETRY_BASE_DELAY_S}s, maxRetries: ${CALLBACK_MAX_RETRIES})`,
 		);
 	}
 
@@ -48,15 +66,15 @@ export class TenantForwardingScheduler {
 				(prisma) =>
 					prisma.message.findMany({
 						where: {
-							status: { not: "forwarded" },
+							status: { notIn: ["forwarded", "delivery_failed"] },
 							session: { server_name: SERVER_NAME },
 						},
 						select: { session_id: true },
 						distinct: ["session_id"],
-				}) as Promise<{ session_id: bigint }[]>,
-		);
+					}) as Promise<{ session_id: bigint }[]>,
+			);
 
-		await Promise.all(rows.map((r) => this.processSession(r.session_id)));
+			await Promise.all(rows.map((r) => this.processSession(r.session_id)));
 		} catch (error) {
 			console.error("[ForwardingScheduler] Tick error:", error);
 		} finally {
@@ -123,8 +141,9 @@ export class TenantForwardingScheduler {
 	 * Returns the forwarded message's `id` (the new cursor) on success,
 	 * or `null` when:
 	 *  - There are no more messages to forward
-	 *  - The next message is still `pending` (download in flight) — blocks the queue
-	 *  - The HTTP POST to the callback URL failed — will be retried next tick
+	 *  - The next message is still `pending` (download in flight)
+	 *  - The next message is waiting for its retry delay to expire
+	 *  - The HTTP POST to the callback URL failed
 	 */
 	private async forwardNext(
 		sessionId: bigint,
@@ -140,13 +159,19 @@ export class TenantForwardingScheduler {
 					id: { gt: lastForwardedId },
 				},
 				orderBy: { id: "asc" },
-				select: { id: true, raw_payload: true, status: true },
+				select: {
+					id: true,
+					raw_payload: true,
+					status: true,
+					delivery_retry_count: true,
+					next_delivery_attempt_at: true,
+				},
 			});
 
 			if (!nextMsg) return null;
 
-			// Already forwarded — advance the cursor and continue
-			if (nextMsg.status === "forwarded") {
+			// Already forwarded or permanently failed — advance the cursor past it
+			if (nextMsg.status === "forwarded" || nextMsg.status === "delivery_failed") {
 				await prisma.tenantMessageState.update({
 					where: { session_id: sessionId },
 					data: { last_forwarded_id: nextMsg.id },
@@ -157,39 +182,124 @@ export class TenantForwardingScheduler {
 			// Attachment still downloading — stop the queue for this session
 			if (nextMsg.status !== "downloaded") return null;
 
-			const posted = await this.postToCallbackUrl(
+			// Retry delay has not elapsed yet — stop the queue for now
+			if (
+				nextMsg.next_delivery_attempt_at &&
+				nextMsg.next_delivery_attempt_at > new Date()
+			) {
+				return null;
+			}
+
+			const postResult = await this.postToCallbackUrl(
 				callbackUrl,
 				nextMsg.raw_payload,
 			);
-			if (!posted) return null;
 
+			if (postResult.ok) {
+				await this.handleDeliverySuccess(prisma, sessionId, nextMsg.id);
+				console.log(
+					`[ForwardingScheduler] Forwarded message ${nextMsg.id} for session ${sessionId}`,
+				);
+				return nextMsg.id;
+			}
+
+			await this.handleDeliveryFailure(
+				prisma,
+				sessionId,
+				nextMsg.id,
+				nextMsg.delivery_retry_count,
+				postResult.error,
+			);
+			return null;
+		});
+	}
+
+	/**
+	 * On successful delivery: advance the cursor and delete the message row.
+	 * Attachments are removed automatically via the existing cascade.
+	 */
+	private async handleDeliverySuccess(
+		prisma: PrismaClient,
+		sessionId: bigint,
+		messageId: bigint,
+	): Promise<void> {
+		await prisma.$transaction([
+			prisma.tenantMessageState.update({
+				where: { session_id: sessionId },
+				data: { last_forwarded_id: messageId },
+			}),
+			prisma.message.delete({
+				where: { id: messageId },
+			}),
+		]);
+	}
+
+	/**
+	 * On failed delivery: increment the retry counter and schedule the next
+	 * attempt using linear back-off (`attempt * base`).  If retries are
+	 * exhausted, mark the message as permanently failed and advance the cursor.
+	 */
+	private async handleDeliveryFailure(
+		prisma: PrismaClient,
+		sessionId: bigint,
+		messageId: bigint,
+		currentRetryCount: number,
+		errorMessage: string,
+	): Promise<void> {
+		const newRetryCount = currentRetryCount + 1;
+
+		if (newRetryCount >= CALLBACK_MAX_RETRIES) {
 			await prisma.$transaction([
 				prisma.message.update({
-					where: { id: nextMsg.id },
-					data: { status: "forwarded" },
+					where: { id: messageId },
+					data: {
+						status: "delivery_failed",
+						delivery_retry_count: newRetryCount,
+						delivery_failed_at: new Date(),
+						last_delivery_error: errorMessage,
+						next_delivery_attempt_at: null,
+					},
 				}),
 				prisma.tenantMessageState.update({
 					where: { session_id: sessionId },
-					data: { last_forwarded_id: nextMsg.id },
+					data: { last_forwarded_id: messageId },
 				}),
 			]);
 
-			console.log(
-				`[ForwardingScheduler] Forwarded message ${nextMsg.id} for session ${sessionId}`,
+			console.error(
+				`[ForwardingScheduler] Message ${messageId} permanently failed after ${newRetryCount} attempts: ${errorMessage}`,
 			);
-			return nextMsg.id;
+			return;
+		}
+
+		const delaySec = newRetryCount * CALLBACK_RETRY_BASE_DELAY_S;
+		const nextAttempt = new Date(Date.now() + delaySec * 1000);
+
+		await prisma.message.update({
+			where: { id: messageId },
+			data: {
+				delivery_retry_count: newRetryCount,
+				next_delivery_attempt_at: nextAttempt,
+				last_delivery_error: errorMessage,
+			},
 		});
+
+		console.warn(
+			`[ForwardingScheduler] Message ${messageId} delivery failed ` +
+				`(attempt ${newRetryCount}/${CALLBACK_MAX_RETRIES}), ` +
+				`next retry in ${delaySec}s: ${errorMessage}`,
+		);
 	}
 
 	private async postToCallbackUrl(
 		callbackUrl: string,
 		rawPayload: string | null,
-	): Promise<boolean> {
+	): Promise<{ ok: true } | { ok: false; error: string }> {
 		if (!rawPayload) {
 			console.warn(
 				`[ForwardingScheduler] Message has no raw_payload, skipping`,
 			);
-			return true;
+			return { ok: true };
 		}
 
 		try {
@@ -200,16 +310,18 @@ export class TenantForwardingScheduler {
 			});
 
 			if (!res.ok) {
-				throw new Error(`HTTP ${res.status} ${res.statusText}`);
+				return {
+					ok: false,
+					error: `HTTP ${res.status} ${res.statusText}`,
+				};
 			}
 
-			return true;
+			return { ok: true };
 		} catch (error) {
-			console.error(
-				`[ForwardingScheduler] POST to ${callbackUrl} failed, will retry on next tick:`,
-				error instanceof Error ? error.message : error,
-			);
-			return false;
+			return {
+				ok: false,
+				error: error instanceof Error ? error.message : String(error),
+			};
 		}
 	}
 }

@@ -37,6 +37,7 @@ enum MessageStatus {
   pending
   downloaded
   forwarded
+  delivery_failed
 }
 
 enum DownloadTaskStatus {
@@ -47,14 +48,18 @@ enum DownloadTaskStatus {
 }
 
 model Message {
-  id          BigInt        @id @default(autoincrement())
-  session_id  BigInt
-  raw_payload String?       @db.Text
-  status      MessageStatus @default(pending)
-  created_at  DateTime      @default(now())
-  updated_at  DateTime      @updatedAt
-  session     TelegramSession @relation(fields: [session_id], references: [id], onDelete: Cascade)
-  attachments Attachment[]
+  id                       BigInt        @id @default(autoincrement())
+  session_id               BigInt
+  raw_payload              String?       @db.Text
+  status                   MessageStatus @default(pending)
+  delivery_retry_count     Int           @default(0)
+  next_delivery_attempt_at DateTime?
+  delivery_failed_at       DateTime?
+  last_delivery_error      String?       @db.Text
+  created_at               DateTime      @default(now())
+  updated_at               DateTime      @updatedAt
+  session                  TelegramSession @relation(fields: [session_id], references: [id], onDelete: Cascade)
+  attachments              Attachment[]
 
   @@index([session_id, id, status])
   @@map("messages")
