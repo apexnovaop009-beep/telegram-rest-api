@@ -4,6 +4,10 @@ import { IncomingEventHandler } from "./IncomingEventHandler";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { SessionStatus } from "../database/constants/SessionStatus";
 import { TelegramClientInterface } from "./interface/Telegram";
+import {
+	SessionCallbackService,
+	type SessionLifecycleReason,
+} from "../services/SessionCallbackService";
 
 interface TelegramSessionRecord {
 	id: bigint;
@@ -117,15 +121,35 @@ export class TelegramClientService implements TelegramClientInterface {
 	 * Returns `false` if the session does not exist on this server, so callers
 	 * can distinguish between a valid logout and an invalid/foreign session.
 	 */
-	static async invalidate(sessionId: string): Promise<boolean> {
+	static async invalidate(
+		sessionId: string,
+		reason: SessionLifecycleReason = "unauthorized",
+	): Promise<boolean> {
 		TelegramClientService.stopEventHandler(sessionId);
 
-		const result = await DatabaseClient.getInstance().execute(
+		const serverName = process.env.SERVER_NAME ?? "";
+		const db = DatabaseClient.getInstance();
+
+		const sessionRecord = await db.execute(
+			(prisma) =>
+				prisma.telegramSession.findFirst({
+					where: { session_id: sessionId, server_name: serverName },
+					select: {
+						callback_url: true,
+						telegram_user_id: true,
+					},
+				}) as Promise<{
+					callback_url: string;
+					telegram_user_id: string;
+				} | null>,
+		);
+
+		const result = await db.execute(
 			(prisma) =>
 				prisma.telegramSession.deleteMany({
 					where: {
 						session_id: sessionId,
-						server_name: process.env.SERVER_NAME ?? "",
+						server_name: serverName,
 					},
 				}) as Promise<{ count: number }>,
 		);
@@ -146,6 +170,17 @@ export class TelegramClientService implements TelegramClientInterface {
 				// Client may already be in a broken state; ignore destroy errors
 			}
 			TelegramClientService.pool.delete(sessionId);
+		}
+
+		if (sessionRecord?.callback_url) {
+			await SessionCallbackService.notify(
+				sessionRecord.callback_url,
+				"telegram_session_removed",
+				sessionId,
+				sessionRecord.telegram_user_id,
+				"removed",
+				reason,
+			);
 		}
 
 		return true;

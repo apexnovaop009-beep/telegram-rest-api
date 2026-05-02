@@ -1,11 +1,16 @@
 import { TelegramClientService } from "./TelegramClientService";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { SessionStatus } from "../database/constants/SessionStatus";
+import {
+	SessionCallbackService,
+	type SessionLifecycleReason,
+} from "../services/SessionCallbackService";
 
 interface TelegramSessionRecord {
 	id: bigint;
 	session_id: string;
 	telegram_user_id: string;
+	callback_url?: string;
 }
 
 /**
@@ -36,6 +41,9 @@ export class TelegramSessionWatchdog {
 
 	/** Tracks consecutive `isUserAuthorized()` failures per session. */
 	private readonly failureCounts = new Map<string, number>();
+
+	/** Last lifecycle reason emitted per session, used to avoid callback spam. */
+	private readonly lastEmittedReason = new Map<string, SessionLifecycleReason>();
 
 	/**
 	 * Starts the watchdog timer.
@@ -138,9 +146,15 @@ export class TelegramSessionWatchdog {
 			return;
 		}
 
+		const sessionInfoCache = new Map<
+			string,
+			{ callback_url: string; telegram_user_id: string }
+		>();
+
 		for (const [sessionId, authorized] of results) {
 			if (authorized) {
 				this.failureCounts.delete(sessionId);
+				this.lastEmittedReason.delete(sessionId);
 				continue;
 			}
 
@@ -149,7 +163,11 @@ export class TelegramSessionWatchdog {
 
 			if (count >= REVOKE_AFTER_FAILURES) {
 				this.failureCounts.delete(sessionId);
-				await TelegramClientService.invalidate(sessionId);
+				this.lastEmittedReason.delete(sessionId);
+				await TelegramClientService.invalidate(
+					sessionId,
+					"authorization_check_failed",
+				);
 				console.log(
 					`[Watchdog] Session unauthorized ${count} consecutive times — revoked`,
 				);
@@ -157,6 +175,30 @@ export class TelegramSessionWatchdog {
 				console.warn(
 					`[Watchdog] Session authorization check failed (${count}/${REVOKE_AFTER_FAILURES})`,
 				);
+
+				if (
+					this.lastEmittedReason.get(sessionId) !==
+					"authorization_check_failed"
+				) {
+					const info = await this.resolveSessionInfo(
+						sessionId,
+						sessionInfoCache,
+					);
+					if (info) {
+						await SessionCallbackService.notify(
+							info.callback_url,
+							"telegram_session_disconnected",
+							sessionId,
+							info.telegram_user_id,
+							"disconnected",
+							"authorization_check_failed",
+						);
+						this.lastEmittedReason.set(
+							sessionId,
+							"authorization_check_failed",
+						);
+					}
+				}
 			}
 		}
 	}
@@ -174,7 +216,6 @@ export class TelegramSessionWatchdog {
 		let activeSessions: TelegramSessionRecord[];
 
 		try {
-			// Get all active sessions from the database by server name and status active
 			activeSessions = await DatabaseClient.getInstance().execute<
 				TelegramSessionRecord[]
 			>((prisma) =>
@@ -183,6 +224,7 @@ export class TelegramSessionWatchdog {
 						id: true,
 						session_id: true,
 						telegram_user_id: true,
+						callback_url: true,
 					},
 					where: {
 						status: SessionStatus.ACTIVE,
@@ -202,6 +244,21 @@ export class TelegramSessionWatchdog {
 				`[Watchdog] Session id=${session.id} is active in DB but not pooled — Reconnecting`,
 			);
 
+			if (
+				session.callback_url &&
+				this.lastEmittedReason.get(session.session_id) !== "reconnecting"
+			) {
+				await SessionCallbackService.notify(
+					session.callback_url,
+					"telegram_session_disconnected",
+					session.session_id,
+					session.telegram_user_id,
+					"reconnecting",
+					"reconnecting",
+				);
+				this.lastEmittedReason.set(session.session_id, "reconnecting");
+			}
+
 			try {
 				const client = await TelegramClientService.initialize(
 					session.session_id,
@@ -211,6 +268,7 @@ export class TelegramSessionWatchdog {
 					client,
 					session.telegram_user_id,
 				);
+				this.lastEmittedReason.delete(session.session_id);
 				console.log(
 					`[Watchdog] Session id=${session.id} reconnect successfully`,
 				);
@@ -219,7 +277,53 @@ export class TelegramSessionWatchdog {
 					`[Watchdog] Failed to reconnect session id=${session.id}:`,
 					error,
 				);
+
+				if (
+					session.callback_url &&
+					this.lastEmittedReason.get(session.session_id) !==
+						"reconnect_failed"
+				) {
+					await SessionCallbackService.notify(
+						session.callback_url,
+						"telegram_session_disconnected",
+						session.session_id,
+						session.telegram_user_id,
+						"disconnected",
+						"reconnect_failed",
+					);
+					this.lastEmittedReason.set(
+						session.session_id,
+						"reconnect_failed",
+					);
+				}
 			}
 		}
+	}
+
+	private async resolveSessionInfo(
+		sessionId: string,
+		cache: Map<string, { callback_url: string; telegram_user_id: string }>,
+	): Promise<{ callback_url: string; telegram_user_id: string } | null> {
+		const cached = cache.get(sessionId);
+		if (cached) return cached;
+
+		const record = await DatabaseClient.getInstance().execute(
+			(prisma) =>
+				prisma.telegramSession.findFirst({
+					where: {
+						session_id: sessionId,
+						server_name: process.env.SERVER_NAME ?? "",
+					},
+					select: { callback_url: true, telegram_user_id: true },
+				}) as Promise<{
+					callback_url: string;
+					telegram_user_id: string;
+				} | null>,
+		);
+
+		if (record) {
+			cache.set(sessionId, record);
+		}
+		return record;
 	}
 }

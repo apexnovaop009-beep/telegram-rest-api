@@ -287,7 +287,10 @@ export class AuthRoute extends BaseRoute {
 				}
 
 				try {
-					const invalidated = await TelegramClientService.invalidate(sessionId);
+					const invalidated = await TelegramClientService.invalidate(
+						sessionId,
+						"logout",
+					);
 
 					if (!invalidated) {
 						return new ErrorResponse(
