@@ -1,6 +1,6 @@
 import { Api, TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions";
-import { IncomingEventHandler } from "./IncomingEventHandler";
+import { EventHandler } from "./EventHandler";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { SessionStatus } from "../database/constants/SessionStatus";
 import { TelegramClientInterface } from "./interface/Telegram";
@@ -30,10 +30,7 @@ export class TelegramClientService implements TelegramClientInterface {
 	// ── Static Pool State ──────────────────────────────────────────────
 
 	private static readonly pool = new Map<string, TelegramClientService>();
-	private static readonly eventHandlers = new Map<
-		string,
-		IncomingEventHandler
-	>();
+	private static readonly eventHandlers = new Map<string, EventHandler>();
 
 	// ── Instance State ─────────────────────────────────────────────────
 
@@ -234,7 +231,7 @@ export class TelegramClientService implements TelegramClientInterface {
 		client: TelegramClientService,
 		telegramUserId: string,
 	): void {
-		const handler = new IncomingEventHandler(
+		const handler = new EventHandler(
 			client.getClient(),
 			telegramUserId,
 			sessionId,

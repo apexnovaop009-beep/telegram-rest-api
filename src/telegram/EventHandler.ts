@@ -37,7 +37,7 @@ interface ParsedMedia {
 	rawInputJson: string;
 }
 
-export class IncomingEventHandler {
+export class EventHandler {
 	private readonly client: TelegramClient;
 	private readonly telegramUserId: string;
 	private readonly sessionId: string;
@@ -107,6 +107,7 @@ export class IncomingEventHandler {
 			userId: sessionRecord.telegram_user_id,
 			className: "PeerUser",
 		};
+		parsed.out = this.isOutgoingMessage(update);
 		const rawPayload = JSON.stringify(parsed);
 
 		await this.persistMessageWithMedia(sessionRecord.id, rawPayload, mediaList);
@@ -183,7 +184,7 @@ export class IncomingEventHandler {
 
 		for (
 			let attempt = 0;
-			attempt <= IncomingEventHandler.UNIQUE_CONFLICT_MAX_RETRIES;
+			attempt <= EventHandler.UNIQUE_CONFLICT_MAX_RETRIES;
 			attempt++
 		) {
 			try {
@@ -312,13 +313,21 @@ export class IncomingEventHandler {
 
 				if (
 					isUniqueViolation &&
-					attempt < IncomingEventHandler.UNIQUE_CONFLICT_MAX_RETRIES
-				) {
-					continue;
+					attempt < EventHandler.UNIQUE_CONFLICT_MAX_RETRIES
+		) {
+			continue;
 				}
 				throw error;
 			}
 		}
+	}
+
+	// ── Outgoing Detection ──────────────────────────────────────────────
+
+	private isOutgoingMessage(update: Api.TypeUpdate): boolean {
+		const message = this.extractMessageFromUpdate(update);
+		if (!message) return false;
+		return "out" in message && message.out === true;
 	}
 
 	// ── Media Extraction ────────────────────────────────────────────────
