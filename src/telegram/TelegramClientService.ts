@@ -1,5 +1,6 @@
 import { Api, TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions";
+import { eq, and } from "drizzle-orm";
 import { EventHandler } from "./EventHandler";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { SessionStatus } from "../database/constants/SessionStatus";
@@ -8,6 +9,7 @@ import {
 	SessionCallbackService,
 	type SessionLifecycleReason,
 } from "../services/SessionCallbackService";
+import { telegramSessions } from "../database/schema";
 
 interface TelegramSessionRecord {
 	id: bigint;
@@ -127,31 +129,35 @@ export class TelegramClientService implements TelegramClientInterface {
 		const serverName = process.env.SERVER_NAME ?? "";
 		const db = DatabaseClient.getInstance();
 
-		const sessionRecord = await db.execute(
-			(prisma) =>
-				prisma.telegramSession.findFirst({
-					where: { session_id: sessionId, server_name: serverName },
-					select: {
-						callback_url: true,
-						telegram_user_id: true,
-					},
-				}) as Promise<{
-					callback_url: string;
-					telegram_user_id: string;
-				} | null>,
+		const sessionRows = await db.execute((d) =>
+			d
+				.select({
+					callback_url: telegramSessions.callback_url,
+					telegram_user_id: telegramSessions.telegram_user_id,
+				})
+				.from(telegramSessions)
+				.where(
+					and(
+						eq(telegramSessions.session_id, sessionId),
+						eq(telegramSessions.server_name, serverName),
+					),
+				)
+				.limit(1),
+		);
+		const sessionRecord = sessionRows[0] ?? null;
+
+		const result = await db.execute((d) =>
+			d
+				.delete(telegramSessions)
+				.where(
+					and(
+						eq(telegramSessions.session_id, sessionId),
+						eq(telegramSessions.server_name, serverName),
+					),
+				),
 		);
 
-		const result = await db.execute(
-			(prisma) =>
-				prisma.telegramSession.deleteMany({
-					where: {
-						session_id: sessionId,
-						server_name: serverName,
-					},
-				}) as Promise<{ count: number }>,
-		);
-
-		if (result.count === 0) {
+		if (result.rowCount === 0) {
 			return false;
 		}
 
@@ -195,13 +201,16 @@ export class TelegramClientService implements TelegramClientInterface {
 		}
 
 		const db = DatabaseClient.getInstance();
-		const sessions = await db.execute<TelegramSessionRecord[]>((prisma) =>
-			prisma.telegramSession.findMany({
-				where: {
-					status: SessionStatus.ACTIVE,
-					server_name: serverName,
-				},
-			}),
+		const sessions = await db.execute((d) =>
+			d
+				.select()
+				.from(telegramSessions)
+				.where(
+					and(
+						eq(telegramSessions.status, SessionStatus.ACTIVE),
+						eq(telegramSessions.server_name, serverName),
+					),
+				),
 		);
 
 		for (const session of sessions) {

@@ -7,12 +7,13 @@ RUN apt-get update -y && apt-get install -y openssl python3 make g++ && rm -rf /
 WORKDIR /app
 
 COPY package*.json ./
-COPY prisma ./prisma
 
 RUN npm install
 
 COPY tsconfig.json ./
+COPY drizzle.config.ts ./
 COPY src ./src
+COPY drizzle ./drizzle
 
 RUN npm run build; npm prune --omit=dev && npm cache clean --force
 
@@ -20,4 +21,4 @@ ENV NODE_ENV=production
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/server.js"]
+CMD ["node", "dist/server.js"]

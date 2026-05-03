@@ -1,5 +1,11 @@
-import { PrismaClient } from "@prisma/client";
+import { eq, and, notInArray, asc, gt } from "drizzle-orm";
+import { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseClient } from "../database/DatabaseClient";
+import {
+	messages,
+	telegramSessions,
+	tenantMessageState,
+} from "../database/schema";
 
 const FORWARDING_INTERVAL_MS = parseInt(
 	process.env.FORWARDING_INTERVAL_MS ?? "1000",
@@ -59,17 +65,25 @@ export class TenantForwardingScheduler {
 		try {
 			const db = DatabaseClient.getInstance();
 
-			const rows = await db.execute(
-				(prisma) =>
-					prisma.message.findMany({
-						where: {
-							status: { notIn: ["forwarded", "delivery_failed"] },
-							session: { server_name: SERVER_NAME },
-						},
-						select: { session_id: true },
-						distinct: ["session_id"],
-					}) as Promise<{ session_id: bigint }[]>,
-			);
+			const rows = await db.execute(async (d) => {
+				const result = await d
+					.selectDistinct({ session_id: messages.session_id })
+					.from(messages)
+					.innerJoin(
+						telegramSessions,
+						eq(messages.session_id, telegramSessions.id),
+					)
+					.where(
+						and(
+							notInArray(messages.status, [
+								"forwarded",
+								"delivery_failed",
+							]),
+							eq(telegramSessions.server_name, SERVER_NAME),
+						),
+					);
+				return result;
+			});
 
 			await Promise.all(rows.map((r) => this.processSession(r.session_id)));
 		} catch (error) {
@@ -83,13 +97,14 @@ export class TenantForwardingScheduler {
 		try {
 			const db = DatabaseClient.getInstance();
 
-			const session = await db.execute(
-				(prisma) =>
-					prisma.telegramSession.findUnique({
-						where: { id: sessionId },
-						select: { callback_url: true },
-					}) as Promise<{ callback_url: string } | null>,
+			const sessionRows = await db.execute((d) =>
+				d
+					.select({ callback_url: telegramSessions.callback_url })
+					.from(telegramSessions)
+					.where(eq(telegramSessions.id, sessionId))
+					.limit(1),
 			);
+			const session = sessionRows[0] ?? null;
 
 			if (!session?.callback_url) {
 				console.warn(
@@ -98,19 +113,27 @@ export class TenantForwardingScheduler {
 				return;
 			}
 
-			const state = await db.execute(
-				(prisma) =>
-					prisma.tenantMessageState.upsert({
-						where: { session_id: sessionId },
-						update: {},
-						create: {
-							session_id: sessionId,
-							last_forwarded_id: BigInt(0),
-						},
-					}) as Promise<{ last_forwarded_id: bigint }>,
-			);
+			const stateRows = await db.execute(async (d) => {
+				const existing = await d
+					.select({
+						last_forwarded_id:
+							tenantMessageState.last_forwarded_id,
+					})
+					.from(tenantMessageState)
+					.where(eq(tenantMessageState.session_id, sessionId))
+					.limit(1);
 
-			let lastForwardedId = state.last_forwarded_id;
+				if (existing.length > 0) return existing;
+
+				await d.insert(tenantMessageState).values({
+					session_id: sessionId,
+					last_forwarded_id: BigInt(0),
+					updated_at: new Date(),
+				});
+				return [{ last_forwarded_id: BigInt(0) }];
+			});
+
+			let lastForwardedId = stateRows[0].last_forwarded_id;
 			let nextId: bigint | null;
 
 			do {
@@ -148,34 +171,43 @@ export class TenantForwardingScheduler {
 	): Promise<bigint | null> {
 		const db = DatabaseClient.getInstance();
 
-		return db.execute(async (prisma) => {
-			const nextMsg = await prisma.message.findFirst({
-				where: {
-					session_id: sessionId,
-					id: { gt: lastForwardedId },
-				},
-				orderBy: { id: "asc" },
-				select: {
-					id: true,
-					raw_payload: true,
-					status: true,
-					delivery_retry_count: true,
-					next_delivery_attempt_at: true,
-				},
-			});
+		return db.execute(async (d) => {
+			const rows = await d
+				.select({
+					id: messages.id,
+					raw_payload: messages.raw_payload,
+					status: messages.status,
+					delivery_retry_count: messages.delivery_retry_count,
+					next_delivery_attempt_at:
+						messages.next_delivery_attempt_at,
+				})
+				.from(messages)
+				.where(
+					and(
+						eq(messages.session_id, sessionId),
+						gt(messages.id, lastForwardedId),
+					),
+				)
+				.orderBy(asc(messages.id))
+				.limit(1);
 
+			const nextMsg = rows[0];
 			if (!nextMsg) return null;
 
-			// Already forwarded or permanently failed — advance the cursor past it
-			if (nextMsg.status === "forwarded" || nextMsg.status === "delivery_failed") {
-				await prisma.tenantMessageState.update({
-					where: { session_id: sessionId },
-					data: { last_forwarded_id: nextMsg.id },
-				});
+			if (
+				nextMsg.status === "forwarded" ||
+				nextMsg.status === "delivery_failed"
+			) {
+				await d
+					.update(tenantMessageState)
+					.set({
+						last_forwarded_id: nextMsg.id,
+						updated_at: new Date(),
+					})
+					.where(eq(tenantMessageState.session_id, sessionId));
 				return nextMsg.id;
 			}
 
-			// Retry delay has not elapsed yet — stop the queue for now
 			if (
 				nextMsg.next_delivery_attempt_at &&
 				nextMsg.next_delivery_attempt_at > new Date()
@@ -189,7 +221,7 @@ export class TenantForwardingScheduler {
 			);
 
 			if (postResult.ok) {
-				await this.handleDeliverySuccess(prisma, sessionId, nextMsg.id);
+				await this.handleDeliverySuccess(d, sessionId, nextMsg.id);
 				console.log(
 					`[ForwardingScheduler] Forwarded message ${nextMsg.id} for session ${sessionId}`,
 				);
@@ -197,7 +229,7 @@ export class TenantForwardingScheduler {
 			}
 
 			await this.handleDeliveryFailure(
-				prisma,
+				d,
 				sessionId,
 				nextMsg.id,
 				nextMsg.delivery_retry_count,
@@ -211,19 +243,22 @@ export class TenantForwardingScheduler {
 	 * On successful delivery: advance the cursor and delete the message row.
 	 */
 	private async handleDeliverySuccess(
-		prisma: PrismaClient,
+		db: NodePgDatabase,
 		sessionId: bigint,
 		messageId: bigint,
 	): Promise<void> {
-		await prisma.$transaction([
-			prisma.tenantMessageState.update({
-				where: { session_id: sessionId },
-				data: { last_forwarded_id: messageId },
-			}),
-			prisma.message.delete({
-				where: { id: messageId },
-			}),
-		]);
+		await db.transaction(async (tx) => {
+			await tx
+				.update(tenantMessageState)
+				.set({
+					last_forwarded_id: messageId,
+					updated_at: new Date(),
+				})
+				.where(eq(tenantMessageState.session_id, sessionId));
+			await tx
+				.delete(messages)
+				.where(eq(messages.id, messageId));
+		});
 	}
 
 	/**
@@ -232,7 +267,7 @@ export class TenantForwardingScheduler {
 	 * exhausted, mark the message as permanently failed and advance the cursor.
 	 */
 	private async handleDeliveryFailure(
-		prisma: PrismaClient,
+		db: NodePgDatabase,
 		sessionId: bigint,
 		messageId: bigint,
 		currentRetryCount: number,
@@ -241,22 +276,26 @@ export class TenantForwardingScheduler {
 		const newRetryCount = currentRetryCount + 1;
 
 		if (newRetryCount >= CALLBACK_MAX_RETRIES) {
-			await prisma.$transaction([
-				prisma.message.update({
-					where: { id: messageId },
-					data: {
+			await db.transaction(async (tx) => {
+				await tx
+					.update(messages)
+					.set({
 						status: "delivery_failed",
 						delivery_retry_count: newRetryCount,
 						delivery_failed_at: new Date(),
 						last_delivery_error: errorMessage,
 						next_delivery_attempt_at: null,
-					},
-				}),
-				prisma.tenantMessageState.update({
-					where: { session_id: sessionId },
-					data: { last_forwarded_id: messageId },
-				}),
-			]);
+						updated_at: new Date(),
+					})
+					.where(eq(messages.id, messageId));
+				await tx
+					.update(tenantMessageState)
+					.set({
+						last_forwarded_id: messageId,
+						updated_at: new Date(),
+					})
+					.where(eq(tenantMessageState.session_id, sessionId));
+			});
 
 			console.error(
 				`[ForwardingScheduler] Message ${messageId} permanently failed after ${newRetryCount} attempts: ${errorMessage}`,
@@ -267,14 +306,15 @@ export class TenantForwardingScheduler {
 		const delaySec = newRetryCount * CALLBACK_RETRY_BASE_DELAY_S;
 		const nextAttempt = new Date(Date.now() + delaySec * 1000);
 
-		await prisma.message.update({
-			where: { id: messageId },
-			data: {
+		await db
+			.update(messages)
+			.set({
 				delivery_retry_count: newRetryCount,
 				next_delivery_attempt_at: nextAttempt,
 				last_delivery_error: errorMessage,
-			},
-		});
+				updated_at: new Date(),
+			})
+			.where(eq(messages.id, messageId));
 
 		console.warn(
 			`[ForwardingScheduler] Message ${messageId} delivery failed ` +

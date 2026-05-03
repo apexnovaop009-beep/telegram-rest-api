@@ -5,8 +5,10 @@ import bigInt from "big-integer";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { eq, and } from "drizzle-orm";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { S3UploadService } from "../services/S3UploadService";
+import { telegramSessions, messages } from "../database/schema";
 
 const INIT_DELAY_MS = 5000;
 
@@ -148,13 +150,12 @@ export class EventHandler {
 
 		const rawPayload = JSON.stringify(parsed);
 		const db = DatabaseClient.getInstance();
-		await db.execute((prisma) =>
-			prisma.message.create({
-				data: {
-					session_id: sessionRecord.id,
-					raw_payload: rawPayload,
-					status: "downloaded",
-				},
+		await db.execute((d) =>
+			d.insert(messages).values({
+				session_id: sessionRecord.id,
+				raw_payload: rawPayload,
+				status: "downloaded",
+				updated_at: new Date(),
 			}),
 		);
 	}
@@ -451,13 +452,22 @@ export class EventHandler {
 		telegram_user_id: string;
 	} | null> {
 		const db = DatabaseClient.getInstance();
-		return db.execute(
-			(prisma) =>
-				prisma.telegramSession.findFirst({
-					where: { session_id: this.sessionId, status: "active" },
-					select: { id: true, telegram_user_id: true },
-				}) as Promise<{ id: bigint; telegram_user_id: string } | null>,
+		const rows = await db.execute((d) =>
+			d
+				.select({
+					id: telegramSessions.id,
+					telegram_user_id: telegramSessions.telegram_user_id,
+				})
+				.from(telegramSessions)
+				.where(
+					and(
+						eq(telegramSessions.session_id, this.sessionId),
+						eq(telegramSessions.status, "active"),
+					),
+				)
+				.limit(1),
 		);
+		return rows[0] ?? null;
 	}
 
 	private delay(ms: number): Promise<void> {

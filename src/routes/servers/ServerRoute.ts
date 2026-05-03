@@ -1,10 +1,12 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { eq, and, count } from "drizzle-orm";
 import { BaseRoute } from "../BaseRoute";
 import { SuccessResponse, ErrorResponse } from "../../http/ApiResponse";
 import { DatabaseClient } from "../../database/DatabaseClient";
 import { TelegramClientService } from "../../telegram/TelegramClientService";
 import { SessionStatus } from "../../database/constants/SessionStatus";
 import { ServerAuthMiddleware } from "../../http/middleware/ServerAuthMiddleware";
+import { telegramSessions } from "../../database/schema";
 
 export class ServerRoute extends BaseRoute {
 	async register(fastify: FastifyInstance): Promise<void> {
@@ -44,14 +46,18 @@ export class ServerRoute extends BaseRoute {
 					try {
 						const db = DatabaseClient.getInstance();
 
-						const activeSessions = await db.execute<number>((prisma) =>
-							prisma.telegramSession.count({
-								where: {
-									status: SessionStatus.ACTIVE,
-									server_name: serverName,
-								},
-							}),
+						const [row] = await db.execute((d) =>
+							d
+								.select({ count: count() })
+								.from(telegramSessions)
+								.where(
+									and(
+										eq(telegramSessions.status, SessionStatus.ACTIVE),
+										eq(telegramSessions.server_name, serverName),
+									),
+								),
 						);
+						const activeSessions = row?.count ?? 0;
 
 						new SuccessResponse(
 							{

@@ -10,7 +10,6 @@ import { ServerRoute } from "./routes/servers/ServerRoute";
 import { TelegramClientService } from "./telegram/TelegramClientService";
 import { TelegramSessionWatchdog } from "./telegram/TelegramSessionWatchdog";
 import { TenantForwardingScheduler } from "./services/TenantForwardingScheduler";
-import { MediaCleanupScheduler } from "./services/MediaCleanupScheduler";
 import { S3UploadService } from "./services/S3UploadService";
 
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
@@ -29,9 +28,6 @@ async function bootstrap(): Promise<void> {
 
 	const forwardingScheduler = new TenantForwardingScheduler();
 	forwardingScheduler.start();
-
-	const mediaCleanup = new MediaCleanupScheduler();
-	mediaCleanup.start();
 
 	const app = new Application();
 	app

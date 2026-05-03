@@ -3,76 +3,11 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { BaseRoute } from "../BaseRoute";
 import { SuccessResponse, ErrorResponse } from "../../http/ApiResponse";
 import { TelegramUtils, MediaType } from "../../telegram/TelegramUtils";
-import { MediaFileService } from "../../services/MediaFileService";
 import { S3UploadService } from "../../services/S3UploadService";
 
 interface MediaEntry {
 	url: string;
 	type: MediaType;
-}
-
-interface MessageAttachment {
-	file_unique_id: string;
-	file_type: string;
-	url: string | null;
-}
-
-async function downloadMessageAttachments(
-	client: TelegramClient,
-	msg: Api.Message,
-): Promise<MessageAttachment[]> {
-	const { media } = msg;
-	if (!media) return [];
-
-	if (
-		media instanceof Api.MessageMediaPhoto &&
-		media.photo instanceof Api.Photo
-	) {
-		const { photo } = media;
-		const url = await MediaFileService.downloadMessagePhoto(
-			client,
-			photo,
-		).catch((err: unknown) => {
-			console.error(
-				`[GetMessages] Photo download failed for msg ${msg.id}:`,
-				err instanceof Error ? err.message : err,
-			);
-			return null;
-		});
-		return [
-			{
-				file_unique_id: `photo_${photo.id.toString()}`,
-				file_type: "photo",
-				url,
-			},
-		];
-	}
-
-	if (
-		media instanceof Api.MessageMediaDocument &&
-		media.document instanceof Api.Document
-	) {
-		const doc = media.document;
-		let fileType = "document";
-		if (doc.mimeType?.startsWith("video/")) fileType = "video";
-		else if (doc.mimeType?.startsWith("audio/")) fileType = "audio";
-
-		const url = await MediaFileService.downloadMessageDocument(
-			client,
-			doc,
-		).catch((err: unknown) => {
-			console.error(
-				`[GetMessages] Document download failed for msg ${msg.id}:`,
-				err instanceof Error ? err.message : err,
-			);
-			return null;
-		});
-		return [
-			{ file_unique_id: `doc_${doc.id.toString()}`, file_type: fileType, url },
-		];
-	}
-
-	return [];
 }
 
 interface S3Attachment {
@@ -607,27 +542,24 @@ export class MessageRoute extends BaseRoute {
 
 							if (!downloadMedia) return rawResult;
 
-							// Download media for each message concurrently and map
-							// msgId → attachments before serializing.
 							const rawMessages: Api.TypeMessage[] =
 								"messages" in rawResult
 									? (rawResult.messages as Api.TypeMessage[])
 									: [];
 
-							const attachmentsMap = new Map<number, MessageAttachment[]>();
+							const attachmentsMap = new Map<number, S3Attachment[]>();
 
 							await Promise.all(
 								rawMessages.map(async (msg) => {
 									if (!(msg instanceof Api.Message)) return;
-									const entries = await downloadMessageAttachments(tc, msg);
+									const peerId = channel ?? sessionId;
+									const entries = await downloadAndUploadToS3(tc, msg, peerId);
 									if (entries.length > 0) {
 										attachmentsMap.set(msg.id, entries);
 									}
 								}),
 							);
 
-							// Serialize (handles BigInteger from GramJS via toJSON())
-							// then inject the downloaded attachment entries.
 							const serialized = JSON.parse(JSON.stringify(rawResult)) as {
 								messages?: Array<Record<string, unknown>>;
 								[key: string]: unknown;

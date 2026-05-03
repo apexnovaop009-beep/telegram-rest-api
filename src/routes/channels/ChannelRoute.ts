@@ -766,8 +766,7 @@ export class ChannelRoute extends BaseRoute {
 		 * Returns full information about a channel, supergroup, or gigagroup,
 		 * including description, member count, invite link, pinned message, etc.
 		 *
-		 * Downloaded files are tracked in media_files and deleted after
-		 * MEDIA_RETENTION_DAYS days by MediaCleanupScheduler.
+		 * Channel avatars are uploaded to S3 and returned as permanent URLs.
 		 */
 		fastify.post(
 			"/channels/GetFullChannel",
@@ -874,13 +873,6 @@ export class ChannelRoute extends BaseRoute {
 							const fullChatEntry = data.fullChat as Record<string, unknown>;
 							fullChatEntry.topics = topics;
 						}
-
-							// Inject avatar_url into each user that has a profile photo.
-							await MediaFileService.injectUserAvatars(
-								tgClient,
-								channelFull.users,
-								data.users as Array<Record<string, unknown>>,
-							);
 
 							return data;
 						},

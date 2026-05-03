@@ -1,3 +1,4 @@
+import { eq, and } from "drizzle-orm";
 import { TelegramClientService } from "./TelegramClientService";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { SessionStatus } from "../database/constants/SessionStatus";
@@ -5,6 +6,7 @@ import {
 	SessionCallbackService,
 	type SessionLifecycleReason,
 } from "../services/SessionCallbackService";
+import { telegramSessions } from "../database/schema";
 
 interface TelegramSessionRecord {
 	id: bigint;
@@ -216,21 +218,22 @@ export class TelegramSessionWatchdog {
 		let activeSessions: TelegramSessionRecord[];
 
 		try {
-			activeSessions = await DatabaseClient.getInstance().execute<
-				TelegramSessionRecord[]
-			>((prisma) =>
-				prisma.telegramSession.findMany({
-					select: {
-						id: true,
-						session_id: true,
-						telegram_user_id: true,
-						callback_url: true,
-					},
-					where: {
-						status: SessionStatus.ACTIVE,
-						server_name: serverName,
-					},
-				}),
+			activeSessions = await DatabaseClient.getInstance().execute(
+				(db) =>
+					db
+						.select({
+							id: telegramSessions.id,
+							session_id: telegramSessions.session_id,
+							telegram_user_id: telegramSessions.telegram_user_id,
+							callback_url: telegramSessions.callback_url,
+						})
+						.from(telegramSessions)
+						.where(
+							and(
+								eq(telegramSessions.status, SessionStatus.ACTIVE),
+								eq(telegramSessions.server_name, serverName),
+							),
+						),
 			);
 		} catch (error) {
 			console.error("[Watchdog] Failed to query active sessions:", error);
@@ -307,19 +310,25 @@ export class TelegramSessionWatchdog {
 		const cached = cache.get(sessionId);
 		if (cached) return cached;
 
-		const record = await DatabaseClient.getInstance().execute(
-			(prisma) =>
-				prisma.telegramSession.findFirst({
-					where: {
-						session_id: sessionId,
-						server_name: process.env.SERVER_NAME ?? "",
-					},
-					select: { callback_url: true, telegram_user_id: true },
-				}) as Promise<{
-					callback_url: string;
-					telegram_user_id: string;
-				} | null>,
+		const rows = await DatabaseClient.getInstance().execute((db) =>
+			db
+				.select({
+					callback_url: telegramSessions.callback_url,
+					telegram_user_id: telegramSessions.telegram_user_id,
+				})
+				.from(telegramSessions)
+				.where(
+					and(
+						eq(telegramSessions.session_id, sessionId),
+						eq(
+							telegramSessions.server_name,
+							process.env.SERVER_NAME ?? "",
+						),
+					),
+				)
+				.limit(1),
 		);
+		const record = rows[0] ?? null;
 
 		if (record) {
 			cache.set(sessionId, record);
