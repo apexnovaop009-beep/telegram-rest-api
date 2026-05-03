@@ -3,48 +3,61 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { BaseRoute } from "../BaseRoute";
 import { SuccessResponse, ErrorResponse } from "../../http/ApiResponse";
 import { TelegramUtils, MediaType } from "../../telegram/TelegramUtils";
-import { MediaFileService } from "../../services/MediaFileService";
+import { S3UploadService } from "../../services/S3UploadService";
 
 interface MediaEntry {
 	url: string;
 	type: MediaType;
 }
 
-interface MessageAttachment {
+interface S3Attachment {
 	file_unique_id: string;
 	file_type: string;
-	url: string | null;
+	url: string;
 }
 
-async function downloadMessageAttachments(
+async function downloadAndUploadToS3(
 	client: TelegramClient,
 	msg: Api.Message,
-): Promise<MessageAttachment[]> {
+	peerId: string,
+): Promise<S3Attachment[]> {
 	const { media } = msg;
 	if (!media) return [];
+
+	const subPath = `${peerId}`;
 
 	if (
 		media instanceof Api.MessageMediaPhoto &&
 		media.photo instanceof Api.Photo
 	) {
 		const { photo } = media;
-		const url = await MediaFileService.downloadMessagePhoto(
-			client,
-			photo,
-		).catch((err: unknown) => {
-			console.error(
-				`[GetMessages] Photo download failed for msg ${msg.id}:`,
-				err instanceof Error ? err.message : err,
-			);
-			return null;
+		const fileUniqueId = `photo_${photo.id.toString()}`;
+		const fileName = `${msg.id}_${fileUniqueId}.jpg`;
+
+		const existingUrl = await S3UploadService.exists(
+			S3UploadService.buildKey(fileName, subPath),
+		);
+		if (existingUrl) {
+			return [{ file_unique_id: fileUniqueId, file_type: "photo", url: existingUrl }];
+		}
+
+		const bestSize = photo.sizes[photo.sizes.length - 1];
+		const thumbType =
+			"type" in bestSize ? (bestSize as Api.PhotoSize).type : "y";
+		const location = new Api.InputPhotoFileLocation({
+			id: photo.id,
+			accessHash: photo.accessHash,
+			fileReference: photo.fileReference,
+			thumbSize: thumbType,
 		});
-		return [
-			{
-				file_unique_id: `photo_${photo.id.toString()}`,
-				file_type: "photo",
-				url,
-			},
-		];
+		const result = await client.downloadFile(location, {
+			dcId: photo.dcId,
+		});
+		const buffer = toBuffer(result);
+		if (buffer.length === 0) return [];
+
+		const url = await S3UploadService.upload(buffer, fileName, "image/jpeg", subPath);
+		return [{ file_unique_id: fileUniqueId, file_type: "photo", url }];
 	}
 
 	if (
@@ -56,22 +69,60 @@ async function downloadMessageAttachments(
 		if (doc.mimeType?.startsWith("video/")) fileType = "video";
 		else if (doc.mimeType?.startsWith("audio/")) fileType = "audio";
 
-		const url = await MediaFileService.downloadMessageDocument(
-			client,
-			doc,
-		).catch((err: unknown) => {
-			console.error(
-				`[GetMessages] Document download failed for msg ${msg.id}:`,
-				err instanceof Error ? err.message : err,
-			);
-			return null;
+		const fileUniqueId = `doc_${doc.id.toString()}`;
+		const ext = inferDocExtension(doc);
+		const fileName = `${msg.id}_${fileUniqueId}.${ext}`;
+
+		const existingUrl = await S3UploadService.exists(
+			S3UploadService.buildKey(fileName, subPath),
+		);
+		if (existingUrl) {
+			return [{ file_unique_id: fileUniqueId, file_type: fileType, url: existingUrl }];
+		}
+
+		const location = new Api.InputDocumentFileLocation({
+			id: doc.id,
+			accessHash: doc.accessHash,
+			fileReference: doc.fileReference,
+			thumbSize: "",
 		});
-		return [
-			{ file_unique_id: `doc_${doc.id.toString()}`, file_type: fileType, url },
-		];
+		const result = await client.downloadFile(location, {
+			dcId: doc.dcId,
+		});
+		const buffer = toBuffer(result);
+		if (buffer.length === 0) return [];
+
+		const url = await S3UploadService.upload(buffer, fileName, doc.mimeType ?? undefined, subPath);
+		return [{ file_unique_id: fileUniqueId, file_type: fileType, url }];
 	}
 
 	return [];
+}
+
+function inferDocExtension(doc: Api.Document): string {
+	for (const attr of doc.attributes) {
+		if (attr instanceof Api.DocumentAttributeFilename) {
+			const parts = attr.fileName.split(".");
+			if (parts.length > 1) return parts[parts.length - 1];
+		}
+	}
+	const mimeMap: Record<string, string> = {
+		"video/mp4": "mp4",
+		"video/webm": "webm",
+		"audio/ogg": "ogg",
+		"audio/mpeg": "mp3",
+		"application/pdf": "pdf",
+		"image/png": "png",
+		"image/jpeg": "jpg",
+		"image/webp": "webp",
+	};
+	return mimeMap[doc.mimeType ?? ""] ?? "bin";
+}
+
+function toBuffer(result: string | Buffer | undefined): Buffer {
+	if (Buffer.isBuffer(result)) return result;
+	if (typeof result === "string") return Buffer.from(result, "binary");
+	return Buffer.alloc(0);
 }
 
 export class MessageRoute extends BaseRoute {
@@ -491,27 +542,24 @@ export class MessageRoute extends BaseRoute {
 
 							if (!downloadMedia) return rawResult;
 
-							// Download media for each message concurrently and map
-							// msgId → attachments before serializing.
 							const rawMessages: Api.TypeMessage[] =
 								"messages" in rawResult
 									? (rawResult.messages as Api.TypeMessage[])
 									: [];
 
-							const attachmentsMap = new Map<number, MessageAttachment[]>();
+							const attachmentsMap = new Map<number, S3Attachment[]>();
 
 							await Promise.all(
 								rawMessages.map(async (msg) => {
 									if (!(msg instanceof Api.Message)) return;
-									const entries = await downloadMessageAttachments(tc, msg);
+									const peerId = channel ?? sessionId;
+									const entries = await downloadAndUploadToS3(tc, msg, peerId);
 									if (entries.length > 0) {
 										attachmentsMap.set(msg.id, entries);
 									}
 								}),
 							);
 
-							// Serialize (handles BigInteger from GramJS via toJSON())
-							// then inject the downloaded attachment entries.
 							const serialized = JSON.parse(JSON.stringify(rawResult)) as {
 								messages?: Array<Record<string, unknown>>;
 								[key: string]: unknown;
@@ -578,6 +626,129 @@ export class MessageRoute extends BaseRoute {
 					new SuccessResponse(result, "Messages deleted successfully").send(
 						reply,
 					);
+				} catch (error: unknown) {
+					ErrorResponse.fromError(error).send(reply);
+				}
+			},
+		);
+
+		/**
+		 * Downloads all media attachments from the specified messages via GramJS,
+		 * uploads them to S3, and returns permanent public URLs.
+		 *
+		 * Supports photos, documents, videos, and audio files.
+		 * Requires S3 to be configured (S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY).
+		 *
+		 * - Omit `channel` for private chats and basic groups.
+		 * - Supply `channel` for supergroups and channels.
+		 */
+		fastify.post(
+			"/messages/DownloadAttachments",
+			async (request: FastifyRequest, reply: FastifyReply) => {
+				const {
+					sessionId,
+					peer,
+					messageIds,
+					channel,
+				} = request.body as {
+					sessionId: string;
+					peer: string;
+					messageIds: number[];
+					channel?: string;
+				};
+
+				if (!sessionId || !peer || !messageIds?.length) {
+					return new ErrorResponse(
+						"sessionId, peer and messageIds are required",
+						400,
+					).send(reply);
+				}
+
+				if (!S3UploadService.isConfigured()) {
+					return new ErrorResponse(
+						"S3 storage is not configured. Set S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY.",
+						500,
+					).send(reply);
+				}
+
+				try {
+					const result = await this.withTelegramSession(
+						sessionId,
+						async (clientService) => {
+							const tc = clientService.getClient();
+
+							let resolvedPeer: Awaited<
+								ReturnType<typeof tc.getInputEntity>
+							>;
+							try {
+								resolvedPeer = await tc.getInputEntity(peer);
+							} catch {
+								await tc.getDialogs({ limit: 200 });
+								resolvedPeer = await tc.getInputEntity(peer);
+							}
+
+							const inputIds = messageIds.map(
+								(msgId) => new Api.InputMessageID({ id: msgId }),
+							);
+
+							let rawResult: Api.messages.TypeMessages;
+							if (channel) {
+								let resolvedChannel: Awaited<
+									ReturnType<typeof tc.getInputEntity>
+								>;
+								try {
+									resolvedChannel = await tc.getInputEntity(channel);
+								} catch {
+									await tc.getDialogs({ limit: 200 });
+									resolvedChannel = await tc.getInputEntity(channel);
+								}
+								rawResult = await tc.invoke(
+									new Api.channels.GetMessages({
+										channel: resolvedChannel,
+										id: inputIds,
+									}),
+								);
+							} else {
+								rawResult = await tc.invoke(
+									new Api.messages.GetMessages({ id: inputIds }),
+								);
+							}
+
+							const rawMessages: Api.TypeMessage[] =
+								"messages" in rawResult
+									? (rawResult.messages as Api.TypeMessage[])
+									: [];
+
+							const results: Array<{
+								messageId: number;
+								attachments: Array<{
+									file_unique_id: string;
+									file_type: string;
+									url: string;
+								}>;
+							}> = [];
+
+							await Promise.all(
+								rawMessages.map(async (msg) => {
+									if (!(msg instanceof Api.Message)) return;
+									const attachments = await downloadAndUploadToS3(tc, msg, peer);
+									if (attachments.length > 0) {
+										results.push({
+											messageId: msg.id,
+											attachments,
+										});
+									}
+								}),
+							);
+
+							return results;
+						},
+					);
+
+					new SuccessResponse(
+						result,
+						"Attachments downloaded and uploaded successfully",
+					).send(reply);
 				} catch (error: unknown) {
 					ErrorResponse.fromError(error).send(reply);
 				}

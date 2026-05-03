@@ -1,4 +1,11 @@
+import { eq, and, notInArray, asc, gt } from "drizzle-orm";
+import { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { DatabaseClient } from "../database/DatabaseClient";
+import {
+	messages,
+	telegramSessions,
+	tenantMessageState,
+} from "../database/schema";
 
 const FORWARDING_INTERVAL_MS = parseInt(
 	process.env.FORWARDING_INTERVAL_MS ?? "1000",
@@ -6,16 +13,29 @@ const FORWARDING_INTERVAL_MS = parseInt(
 );
 const SERVER_NAME = process.env.SERVER_NAME ?? "";
 
+const CALLBACK_RETRY_BASE_DELAY_S = parseInt(
+	process.env.CALLBACK_RETRY_BASE_DELAY_SECONDS ?? "5",
+	10,
+);
+const CALLBACK_MAX_RETRIES = parseInt(
+	process.env.CALLBACK_MAX_RETRIES ?? "5",
+	10,
+);
+
 /**
  * Forwards messages to each session's callback URL in strict FIFO order.
  *
- * Each session's queue is independent — a blocked session (e.g. waiting for
- * an attachment to finish downloading) does not delay any other session.
+ * Each session's queue is independent — one session's failure does not
+ * delay any other session.
  *
- * FIFO guarantee: the next message for a session is only forwarded once the
- * preceding message reaches `downloaded` status.  A `pending` message
- * (attachment still in flight) stops the queue for that session until the
- * DownloadWorkerService marks it `downloaded`.
+ * FIFO guarantee: messages are forwarded in ascending `id` order per session.
+ *
+ * Retry behaviour: when a callback POST fails the message stays `downloaded`
+ * and `next_delivery_attempt_at` is set using a linear back-off
+ * (`attempt * CALLBACK_RETRY_BASE_DELAY_S`).  After `CALLBACK_MAX_RETRIES`
+ * the message is marked `delivery_failed` and the cursor advances.
+ *
+ * Successfully delivered messages are deleted.
  */
 export class TenantForwardingScheduler {
 	private timer: NodeJS.Timeout | null = null;
@@ -26,7 +46,8 @@ export class TenantForwardingScheduler {
 
 		this.timer = setInterval(() => this.tick(), FORWARDING_INTERVAL_MS);
 		console.log(
-			`[ForwardingScheduler] Started (interval: ${FORWARDING_INTERVAL_MS}ms)`,
+			`[ForwardingScheduler] Started (interval: ${FORWARDING_INTERVAL_MS}ms, ` +
+				`retryBase: ${CALLBACK_RETRY_BASE_DELAY_S}s, maxRetries: ${CALLBACK_MAX_RETRIES})`,
 		);
 	}
 
@@ -44,19 +65,27 @@ export class TenantForwardingScheduler {
 		try {
 			const db = DatabaseClient.getInstance();
 
-			const rows = await db.execute(
-				(prisma) =>
-					prisma.message.findMany({
-						where: {
-							status: { not: "forwarded" },
-							session: { server_name: SERVER_NAME },
-						},
-						select: { session_id: true },
-						distinct: ["session_id"],
-				}) as Promise<{ session_id: bigint }[]>,
-		);
+			const rows = await db.execute(async (d) => {
+				const result = await d
+					.selectDistinct({ session_id: messages.session_id })
+					.from(messages)
+					.innerJoin(
+						telegramSessions,
+						eq(messages.session_id, telegramSessions.id),
+					)
+					.where(
+						and(
+							notInArray(messages.status, [
+								"forwarded",
+								"delivery_failed",
+							]),
+							eq(telegramSessions.server_name, SERVER_NAME),
+						),
+					);
+				return result;
+			});
 
-		await Promise.all(rows.map((r) => this.processSession(r.session_id)));
+			await Promise.all(rows.map((r) => this.processSession(r.session_id)));
 		} catch (error) {
 			console.error("[ForwardingScheduler] Tick error:", error);
 		} finally {
@@ -68,13 +97,14 @@ export class TenantForwardingScheduler {
 		try {
 			const db = DatabaseClient.getInstance();
 
-			const session = await db.execute(
-				(prisma) =>
-					prisma.telegramSession.findUnique({
-						where: { id: sessionId },
-						select: { callback_url: true },
-					}) as Promise<{ callback_url: string } | null>,
+			const sessionRows = await db.execute((d) =>
+				d
+					.select({ callback_url: telegramSessions.callback_url })
+					.from(telegramSessions)
+					.where(eq(telegramSessions.id, sessionId))
+					.limit(1),
 			);
+			const session = sessionRows[0] ?? null;
 
 			if (!session?.callback_url) {
 				console.warn(
@@ -83,19 +113,27 @@ export class TenantForwardingScheduler {
 				return;
 			}
 
-			const state = await db.execute(
-				(prisma) =>
-					prisma.tenantMessageState.upsert({
-						where: { session_id: sessionId },
-						update: {},
-						create: {
-							session_id: sessionId,
-							last_forwarded_id: BigInt(0),
-						},
-					}) as Promise<{ last_forwarded_id: bigint }>,
-			);
+			const stateRows = await db.execute(async (d) => {
+				const existing = await d
+					.select({
+						last_forwarded_id:
+							tenantMessageState.last_forwarded_id,
+					})
+					.from(tenantMessageState)
+					.where(eq(tenantMessageState.session_id, sessionId))
+					.limit(1);
 
-			let lastForwardedId = state.last_forwarded_id;
+				if (existing.length > 0) return existing;
+
+				await d.insert(tenantMessageState).values({
+					session_id: sessionId,
+					last_forwarded_id: BigInt(0),
+					updated_at: new Date(),
+				});
+				return [{ last_forwarded_id: BigInt(0) }];
+			});
+
+			let lastForwardedId = stateRows[0].last_forwarded_id;
 			let nextId: bigint | null;
 
 			do {
@@ -123,8 +161,8 @@ export class TenantForwardingScheduler {
 	 * Returns the forwarded message's `id` (the new cursor) on success,
 	 * or `null` when:
 	 *  - There are no more messages to forward
-	 *  - The next message is still `pending` (download in flight) — blocks the queue
-	 *  - The HTTP POST to the callback URL failed — will be retried next tick
+	 *  - The next message is waiting for its retry delay to expire
+	 *  - The HTTP POST to the callback URL failed
 	 */
 	private async forwardNext(
 		sessionId: bigint,
@@ -133,63 +171,167 @@ export class TenantForwardingScheduler {
 	): Promise<bigint | null> {
 		const db = DatabaseClient.getInstance();
 
-		return db.execute(async (prisma) => {
-			const nextMsg = await prisma.message.findFirst({
-				where: {
-					session_id: sessionId,
-					id: { gt: lastForwardedId },
-				},
-				orderBy: { id: "asc" },
-				select: { id: true, raw_payload: true, status: true },
-			});
+		return db.execute(async (d) => {
+			const rows = await d
+				.select({
+					id: messages.id,
+					raw_payload: messages.raw_payload,
+					status: messages.status,
+					delivery_retry_count: messages.delivery_retry_count,
+					next_delivery_attempt_at:
+						messages.next_delivery_attempt_at,
+				})
+				.from(messages)
+				.where(
+					and(
+						eq(messages.session_id, sessionId),
+						gt(messages.id, lastForwardedId),
+					),
+				)
+				.orderBy(asc(messages.id))
+				.limit(1);
 
+			const nextMsg = rows[0];
 			if (!nextMsg) return null;
 
-			// Already forwarded — advance the cursor and continue
-			if (nextMsg.status === "forwarded") {
-				await prisma.tenantMessageState.update({
-					where: { session_id: sessionId },
-					data: { last_forwarded_id: nextMsg.id },
-				});
+			if (
+				nextMsg.status === "forwarded" ||
+				nextMsg.status === "delivery_failed"
+			) {
+				await d
+					.update(tenantMessageState)
+					.set({
+						last_forwarded_id: nextMsg.id,
+						updated_at: new Date(),
+					})
+					.where(eq(tenantMessageState.session_id, sessionId));
 				return nextMsg.id;
 			}
 
-			// Attachment still downloading — stop the queue for this session
-			if (nextMsg.status !== "downloaded") return null;
+			if (
+				nextMsg.next_delivery_attempt_at &&
+				nextMsg.next_delivery_attempt_at > new Date()
+			) {
+				return null;
+			}
 
-			const posted = await this.postToCallbackUrl(
+			const postResult = await this.postToCallbackUrl(
 				callbackUrl,
 				nextMsg.raw_payload,
 			);
-			if (!posted) return null;
 
-			await prisma.$transaction([
-				prisma.message.update({
-					where: { id: nextMsg.id },
-					data: { status: "forwarded" },
-				}),
-				prisma.tenantMessageState.update({
-					where: { session_id: sessionId },
-					data: { last_forwarded_id: nextMsg.id },
-				}),
-			]);
+			if (postResult.ok) {
+				await this.handleDeliverySuccess(d, sessionId, nextMsg.id);
+				console.log(
+					`[ForwardingScheduler] Forwarded message ${nextMsg.id} for session ${sessionId}`,
+				);
+				return nextMsg.id;
+			}
 
-			console.log(
-				`[ForwardingScheduler] Forwarded message ${nextMsg.id} for session ${sessionId}`,
+			await this.handleDeliveryFailure(
+				d,
+				sessionId,
+				nextMsg.id,
+				nextMsg.delivery_retry_count,
+				postResult.error,
 			);
-			return nextMsg.id;
+			return null;
 		});
+	}
+
+	/**
+	 * On successful delivery: advance the cursor and delete the message row.
+	 */
+	private async handleDeliverySuccess(
+		db: NodePgDatabase,
+		sessionId: bigint,
+		messageId: bigint,
+	): Promise<void> {
+		await db.transaction(async (tx) => {
+			await tx
+				.update(tenantMessageState)
+				.set({
+					last_forwarded_id: messageId,
+					updated_at: new Date(),
+				})
+				.where(eq(tenantMessageState.session_id, sessionId));
+			await tx
+				.delete(messages)
+				.where(eq(messages.id, messageId));
+		});
+	}
+
+	/**
+	 * On failed delivery: increment the retry counter and schedule the next
+	 * attempt using linear back-off (`attempt * base`).  If retries are
+	 * exhausted, mark the message as permanently failed and advance the cursor.
+	 */
+	private async handleDeliveryFailure(
+		db: NodePgDatabase,
+		sessionId: bigint,
+		messageId: bigint,
+		currentRetryCount: number,
+		errorMessage: string,
+	): Promise<void> {
+		const newRetryCount = currentRetryCount + 1;
+
+		if (newRetryCount >= CALLBACK_MAX_RETRIES) {
+			await db.transaction(async (tx) => {
+				await tx
+					.update(messages)
+					.set({
+						status: "delivery_failed",
+						delivery_retry_count: newRetryCount,
+						delivery_failed_at: new Date(),
+						last_delivery_error: errorMessage,
+						next_delivery_attempt_at: null,
+						updated_at: new Date(),
+					})
+					.where(eq(messages.id, messageId));
+				await tx
+					.update(tenantMessageState)
+					.set({
+						last_forwarded_id: messageId,
+						updated_at: new Date(),
+					})
+					.where(eq(tenantMessageState.session_id, sessionId));
+			});
+
+			console.error(
+				`[ForwardingScheduler] Message ${messageId} permanently failed after ${newRetryCount} attempts: ${errorMessage}`,
+			);
+			return;
+		}
+
+		const delaySec = newRetryCount * CALLBACK_RETRY_BASE_DELAY_S;
+		const nextAttempt = new Date(Date.now() + delaySec * 1000);
+
+		await db
+			.update(messages)
+			.set({
+				delivery_retry_count: newRetryCount,
+				next_delivery_attempt_at: nextAttempt,
+				last_delivery_error: errorMessage,
+				updated_at: new Date(),
+			})
+			.where(eq(messages.id, messageId));
+
+		console.warn(
+			`[ForwardingScheduler] Message ${messageId} delivery failed ` +
+				`(attempt ${newRetryCount}/${CALLBACK_MAX_RETRIES}), ` +
+				`next retry in ${delaySec}s: ${errorMessage}`,
+		);
 	}
 
 	private async postToCallbackUrl(
 		callbackUrl: string,
 		rawPayload: string | null,
-	): Promise<boolean> {
+	): Promise<{ ok: true } | { ok: false; error: string }> {
 		if (!rawPayload) {
 			console.warn(
 				`[ForwardingScheduler] Message has no raw_payload, skipping`,
 			);
-			return true;
+			return { ok: true };
 		}
 
 		try {
@@ -200,16 +342,18 @@ export class TenantForwardingScheduler {
 			});
 
 			if (!res.ok) {
-				throw new Error(`HTTP ${res.status} ${res.statusText}`);
+				return {
+					ok: false,
+					error: `HTTP ${res.status} ${res.statusText}`,
+				};
 			}
 
-			return true;
+			return { ok: true };
 		} catch (error) {
-			console.error(
-				`[ForwardingScheduler] POST to ${callbackUrl} failed, will retry on next tick:`,
-				error instanceof Error ? error.message : error,
-			);
-			return false;
+			return {
+				ok: false,
+				error: error instanceof Error ? error.message : String(error),
+			};
 		}
 	}
 }

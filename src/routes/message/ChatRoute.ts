@@ -143,11 +143,8 @@ export class ChatRoute extends BaseRoute {
 		 * Fetches full info for a basic group chat.
 		 *
 		 * Enhancements over the raw Telegram response:
-		 *   - avatar_url: publicly accessible URL of the downloaded group photo
+		 *   - avatar_url: S3 public URL of the group photo
 		 *     (null when the group has no photo set)
-		 *
-		 * Downloaded files are tracked in media_files and deleted after
-		 * MEDIA_RETENTION_DAYS days by MediaCleanupScheduler.
 		 */
 		fastify.post(
 			"/chats/GetFullChat",
@@ -207,13 +204,6 @@ export class ChatRoute extends BaseRoute {
 							if (chatEntry) {
 								chatEntry.avatar_url = avatarUrl;
 							}
-
-							// Inject avatar_url into each user that has a profile photo.
-							await MediaFileService.injectUserAvatars(
-								client.getClient(),
-								chatFull.users,
-								data.users as Array<Record<string, unknown>>,
-							);
 
 							return data;
 						},

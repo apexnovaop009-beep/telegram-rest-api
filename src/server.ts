@@ -9,26 +9,25 @@ import { ChannelRoute } from "./routes/channels/ChannelRoute";
 import { ServerRoute } from "./routes/servers/ServerRoute";
 import { TelegramClientService } from "./telegram/TelegramClientService";
 import { TelegramSessionWatchdog } from "./telegram/TelegramSessionWatchdog";
-import { DownloadWorkerService } from "./services/DownloadWorkerService";
 import { TenantForwardingScheduler } from "./services/TenantForwardingScheduler";
-import { MediaCleanupScheduler } from "./services/MediaCleanupScheduler";
+import { S3UploadService } from "./services/S3UploadService";
 
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
 
 async function bootstrap(): Promise<void> {
+	if (!S3UploadService.isConfigured()) {
+		throw new Error(
+			"S3 storage is not configured. Set S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY.",
+		);
+	}
+
 	await TelegramClientService.restoreFromDatabase();
 
 	const sessionWatchdog = new TelegramSessionWatchdog();
 	sessionWatchdog.start();
 
-	const downloadWorker = new DownloadWorkerService();
-	await downloadWorker.start();
-
 	const forwardingScheduler = new TenantForwardingScheduler();
 	forwardingScheduler.start();
-
-	const mediaCleanup = new MediaCleanupScheduler();
-	mediaCleanup.start();
 
 	const app = new Application();
 	app

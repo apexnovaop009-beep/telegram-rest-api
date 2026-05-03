@@ -1,11 +1,13 @@
 import { Api } from "telegram";
 import { computeCheck } from "telegram/Password";
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { eq, and } from "drizzle-orm";
 import { BaseRoute } from "../BaseRoute";
 import { SuccessResponse, ErrorResponse } from "../../http/ApiResponse";
 import { TelegramClientService } from "../../telegram/TelegramClientService";
 import { DatabaseClient } from "../../database/DatabaseClient";
 import { SessionStatus } from "../../database/constants/SessionStatus";
+import { telegramSessions } from "../../database/schema";
 
 /**
  * Force telegram session to destroy after each request to avoid memory leaks
@@ -26,17 +28,16 @@ export class AuthRoute extends BaseRoute {
 		const telegramUserId = user.id.toString();
 		const serverName = process.env.SERVER_NAME ?? "";
 
-		await DatabaseClient.getInstance().execute((prisma) =>
-			prisma.telegramSession.create({
-				data: {
-					session_id: sessionId,
-					telegram_user_id: telegramUserId,
-					telegram_username: user.username ?? "",
-					telegram_access_hash: user.accessHash?.toString() ?? "",
-					server_name: serverName,
-					callback_url: callbackUrl,
-					status: SessionStatus.ACTIVE,
-				},
+		await DatabaseClient.getInstance().execute((db) =>
+			db.insert(telegramSessions).values({
+				session_id: sessionId,
+				telegram_user_id: telegramUserId,
+				telegram_username: user.username ?? "",
+				telegram_access_hash: user.accessHash?.toString() ?? "",
+				server_name: serverName,
+				callback_url: callbackUrl,
+				status: SessionStatus.ACTIVE,
+				updated_at: new Date(),
 			}),
 		);
 
@@ -287,7 +288,10 @@ export class AuthRoute extends BaseRoute {
 				}
 
 				try {
-					const invalidated = await TelegramClientService.invalidate(sessionId);
+					const invalidated = await TelegramClientService.invalidate(
+						sessionId,
+						"logout",
+					);
 
 					if (!invalidated) {
 						return new ErrorResponse(
@@ -367,17 +371,25 @@ export class AuthRoute extends BaseRoute {
 
 				try {
 					const result = await DatabaseClient.getInstance().execute(
-						(prisma) =>
-							prisma.telegramSession.updateMany({
-								where: {
-									session_id: sessionId,
-									server_name: process.env.SERVER_NAME ?? "",
-								},
-								data: { callback_url: callbackUrl },
-							}),
+						(db) =>
+							db
+								.update(telegramSessions)
+								.set({
+									callback_url: callbackUrl,
+									updated_at: new Date(),
+								})
+								.where(
+									and(
+										eq(telegramSessions.session_id, sessionId),
+										eq(
+											telegramSessions.server_name,
+											process.env.SERVER_NAME ?? "",
+										),
+									),
+								),
 					);
 
-					if (result.count === 0) {
+					if (result.rowCount === 0) {
 						return new ErrorResponse(
 							"Session not found or does not belong to this server",
 							404,

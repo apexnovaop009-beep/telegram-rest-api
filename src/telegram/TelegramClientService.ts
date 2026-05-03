@@ -1,9 +1,15 @@
 import { Api, TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions";
-import { IncomingEventHandler } from "./IncomingEventHandler";
+import { eq, and } from "drizzle-orm";
+import { EventHandler } from "./EventHandler";
 import { DatabaseClient } from "../database/DatabaseClient";
 import { SessionStatus } from "../database/constants/SessionStatus";
 import { TelegramClientInterface } from "./interface/Telegram";
+import {
+	SessionCallbackService,
+	type SessionLifecycleReason,
+} from "../services/SessionCallbackService";
+import { telegramSessions } from "../database/schema";
 
 interface TelegramSessionRecord {
 	id: bigint;
@@ -26,10 +32,7 @@ export class TelegramClientService implements TelegramClientInterface {
 	// ── Static Pool State ──────────────────────────────────────────────
 
 	private static readonly pool = new Map<string, TelegramClientService>();
-	private static readonly eventHandlers = new Map<
-		string,
-		IncomingEventHandler
-	>();
+	private static readonly eventHandlers = new Map<string, EventHandler>();
 
 	// ── Instance State ─────────────────────────────────────────────────
 
@@ -111,26 +114,50 @@ export class TelegramClientService implements TelegramClientInterface {
 
 	/**
 	 * Invalidates a session: stops its handlers, deletes the session record
-	 * (cascades to messages, attachments, and tenant state), logs out from
-	 * Telegram, and removes it from the pool.
+	 * (cascades to messages and tenant state), logs out from Telegram, and
+	 * removes it from the pool.
 	 *
 	 * Returns `false` if the session does not exist on this server, so callers
 	 * can distinguish between a valid logout and an invalid/foreign session.
 	 */
-	static async invalidate(sessionId: string): Promise<boolean> {
+	static async invalidate(
+		sessionId: string,
+		reason: SessionLifecycleReason = "unauthorized",
+	): Promise<boolean> {
 		TelegramClientService.stopEventHandler(sessionId);
 
-		const result = await DatabaseClient.getInstance().execute(
-			(prisma) =>
-				prisma.telegramSession.deleteMany({
-					where: {
-						session_id: sessionId,
-						server_name: process.env.SERVER_NAME ?? "",
-					},
-				}) as Promise<{ count: number }>,
+		const serverName = process.env.SERVER_NAME ?? "";
+		const db = DatabaseClient.getInstance();
+
+		const sessionRows = await db.execute((d) =>
+			d
+				.select({
+					callback_url: telegramSessions.callback_url,
+					telegram_user_id: telegramSessions.telegram_user_id,
+				})
+				.from(telegramSessions)
+				.where(
+					and(
+						eq(telegramSessions.session_id, sessionId),
+						eq(telegramSessions.server_name, serverName),
+					),
+				)
+				.limit(1),
+		);
+		const sessionRecord = sessionRows[0] ?? null;
+
+		const result = await db.execute((d) =>
+			d
+				.delete(telegramSessions)
+				.where(
+					and(
+						eq(telegramSessions.session_id, sessionId),
+						eq(telegramSessions.server_name, serverName),
+					),
+				),
 		);
 
-		if (result.count === 0) {
+		if (result.rowCount === 0) {
 			return false;
 		}
 
@@ -148,6 +175,17 @@ export class TelegramClientService implements TelegramClientInterface {
 			TelegramClientService.pool.delete(sessionId);
 		}
 
+		if (sessionRecord?.callback_url) {
+			await SessionCallbackService.notify(
+				sessionRecord.callback_url,
+				"telegram_session_removed",
+				sessionId,
+				sessionRecord.telegram_user_id,
+				"removed",
+				reason,
+			);
+		}
+
 		return true;
 	}
 
@@ -163,13 +201,16 @@ export class TelegramClientService implements TelegramClientInterface {
 		}
 
 		const db = DatabaseClient.getInstance();
-		const sessions = await db.execute<TelegramSessionRecord[]>((prisma) =>
-			prisma.telegramSession.findMany({
-				where: {
-					status: SessionStatus.ACTIVE,
-					server_name: serverName,
-				},
-			}),
+		const sessions = await db.execute((d) =>
+			d
+				.select()
+				.from(telegramSessions)
+				.where(
+					and(
+						eq(telegramSessions.status, SessionStatus.ACTIVE),
+						eq(telegramSessions.server_name, serverName),
+					),
+				),
 		);
 
 		for (const session of sessions) {
@@ -199,7 +240,7 @@ export class TelegramClientService implements TelegramClientInterface {
 		client: TelegramClientService,
 		telegramUserId: string,
 	): void {
-		const handler = new IncomingEventHandler(
+		const handler = new EventHandler(
 			client.getClient(),
 			telegramUserId,
 			sessionId,

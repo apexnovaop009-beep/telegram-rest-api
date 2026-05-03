@@ -1,3 +1,5 @@
+import { NodePgDatabase } from "drizzle-orm/node-postgres";
+
 export interface DatabaseClientInterface {
-	execute<T>(operation: (client: unknown) => Promise<T>): Promise<T>;
+	execute<T>(operation: (db: NodePgDatabase) => Promise<T>): Promise<T>;
 }
