@@ -2,7 +2,11 @@ import { Api, TelegramClient } from "telegram";
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { BaseRoute } from "../BaseRoute";
 import { SuccessResponse, ErrorResponse } from "../../http/ApiResponse";
-import { TelegramUtils, MediaType } from "../../telegram/TelegramUtils";
+import {
+	TelegramUtils,
+	MediaType,
+	RawMessageEntity,
+} from "../../telegram/TelegramUtils";
 import { S3UploadService } from "../../services/S3UploadService";
 
 interface MediaEntry {
@@ -139,29 +143,33 @@ export class MessageRoute extends BaseRoute {
 		fastify.post(
 			"/messages/SendMessage",
 			async (request: FastifyRequest, reply: FastifyReply) => {
-				const {
-					sessionId,
-					peer,
-					message = "",
-					replyToMsgId = 0,
-					silent = false,
-					background = false,
-					scheduleDate = 0,
-					photos = [],
-					videos = [],
-					files = [],
-				} = request.body as {
-					sessionId: string;
-					peer: string;
-					message?: string;
-					replyToMsgId?: number;
-					silent?: boolean;
-					background?: boolean;
-					scheduleDate?: number;
-					photos?: string[];
-					videos?: string[];
-					files?: string[];
-				};
+			const {
+				sessionId,
+				peer,
+				message = "",
+				replyToMsgId = 0,
+				silent = false,
+				background = false,
+				scheduleDate = 0,
+				photos = [],
+				videos = [],
+				files = [],
+				entities: rawEntities,
+			} = request.body as {
+				sessionId: string;
+				peer: string;
+				message?: string;
+				replyToMsgId?: number;
+				silent?: boolean;
+				background?: boolean;
+				scheduleDate?: number;
+				photos?: string[];
+				videos?: string[];
+				files?: string[];
+				entities?: RawMessageEntity[];
+			};
+
+			const entities = TelegramUtils.buildEntities(rawEntities);
 
 				if (!sessionId || !peer) {
 					return new ErrorResponse("sessionId and peer are required", 400).send(
@@ -222,16 +230,17 @@ export class MessageRoute extends BaseRoute {
 
 							// No media at all → plain text message
 							if (visualMedia.length === 0 && docMedia.length === 0) {
-								const r = await tc.invoke(
-									new Api.messages.SendMessage({
-										peer: resolvedPeer,
-										message,
-										...commonFlags,
-										randomId: TelegramUtils.randomId(),
-									}),
-								);
-								sent.push(r);
-								return sent;
+							const r = await tc.invoke(
+								new Api.messages.SendMessage({
+									peer: resolvedPeer,
+									message,
+									...commonFlags,
+									...(entities && { entities }),
+									randomId: TelegramUtils.randomId(),
+								}),
+							);
+							sent.push(r);
+							return sent;
 							}
 
 							/**
@@ -252,17 +261,18 @@ export class MessageRoute extends BaseRoute {
 										group[0].url,
 										group[0].type,
 									);
-									const r = await tc.invoke(
-										new Api.messages.SendMedia({
-											peer: resolvedPeer,
-											media,
-											message: caption,
-											...commonFlags,
-											randomId: TelegramUtils.randomId(),
-										}),
-									);
-									sent.push(r);
-									return;
+								const r = await tc.invoke(
+									new Api.messages.SendMedia({
+										peer: resolvedPeer,
+										media,
+										message: caption,
+										...commonFlags,
+										...(caption && entities ? { entities } : {}),
+										randomId: TelegramUtils.randomId(),
+									}),
+								);
+								sent.push(r);
+								return;
 								}
 
 								// Upload each file and pre-register it with Telegram
@@ -324,14 +334,17 @@ export class MessageRoute extends BaseRoute {
 								);
 
 								// Caption on the first item only
-								const multiMedia = resolvedInputMedia.map(
-									(media: Api.TypeInputMedia, index: number) =>
-										new Api.InputSingleMedia({
-											media,
-											randomId: TelegramUtils.randomId(),
-											message: index === 0 ? caption : "",
-										}),
-								);
+							const multiMedia = resolvedInputMedia.map(
+								(media: Api.TypeInputMedia, index: number) =>
+									new Api.InputSingleMedia({
+										media,
+										randomId: TelegramUtils.randomId(),
+										message: index === 0 ? caption : "",
+										...(index === 0 && caption && entities
+											? { entities }
+											: {}),
+									}),
+							);
 
 								const r = await tc.invoke(
 									new Api.messages.SendMultiMedia({

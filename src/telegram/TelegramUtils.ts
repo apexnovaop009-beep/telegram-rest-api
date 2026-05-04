@@ -4,6 +4,58 @@ import bigInt from "big-integer";
 
 export type MediaType = "photo" | "video" | "file";
 
+export interface RawMessageEntity {
+	type: string;
+	offset: number;
+	length: number;
+	url?: string;
+	userId?: string | number;
+	language?: string;
+}
+
+const ENTITY_FACTORIES: Record<
+	string,
+	(e: RawMessageEntity) => Api.TypeMessageEntity | null
+> = {
+	bold: (e) =>
+		new Api.MessageEntityBold({ offset: e.offset, length: e.length }),
+	italic: (e) =>
+		new Api.MessageEntityItalic({ offset: e.offset, length: e.length }),
+	underline: (e) =>
+		new Api.MessageEntityUnderline({ offset: e.offset, length: e.length }),
+	strike: (e) =>
+		new Api.MessageEntityStrike({ offset: e.offset, length: e.length }),
+	code: (e) =>
+		new Api.MessageEntityCode({ offset: e.offset, length: e.length }),
+	pre: (e) =>
+		new Api.MessageEntityPre({
+			offset: e.offset,
+			length: e.length,
+			language: e.language ?? "",
+		}),
+	spoiler: (e) =>
+		new Api.MessageEntitySpoiler({ offset: e.offset, length: e.length }),
+	textUrl: (e) => {
+		if (!e.url) return null;
+		return new Api.MessageEntityTextUrl({
+			offset: e.offset,
+			length: e.length,
+			url: e.url,
+		});
+	},
+	mentionName: (e) => {
+		if (e.userId == null) return null;
+		return new Api.InputMessageEntityMentionName({
+			offset: e.offset,
+			length: e.length,
+			userId: new Api.InputUser({
+				userId: bigInt(String(e.userId)),
+				accessHash: bigInt.zero,
+			}),
+		});
+	},
+};
+
 export class TelegramUtils {
 	/**
 	 * Returns true when the error represents a Telegram 401 Unauthorized,
@@ -81,6 +133,25 @@ export class TelegramUtils {
 	 * Generates a unique random ID suitable for Telegram's `randomId` field.
 	 * Combines the current timestamp with a random component to avoid collisions.
 	 */
+	/**
+	 * Converts raw JSON entity descriptors into GramJS MessageEntity instances.
+	 * Unknown types or entities missing required fields are silently skipped.
+	 */
+	static buildEntities(
+		raw: RawMessageEntity[] | undefined,
+	): Api.TypeMessageEntity[] | undefined {
+		if (!raw || raw.length === 0) return undefined;
+
+		const mapped: Api.TypeMessageEntity[] = [];
+		for (const entry of raw) {
+			const factory = ENTITY_FACTORIES[entry.type];
+			if (!factory) continue;
+			const entity = factory(entry);
+			if (entity) mapped.push(entity);
+		}
+		return mapped.length > 0 ? mapped : undefined;
+	}
+
 	static randomId() {
 		return bigInt(Date.now())
 			.multiply(bigInt(1_000))
