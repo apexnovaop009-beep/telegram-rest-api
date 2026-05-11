@@ -57,7 +57,7 @@ export class TelegramSessionWatchdog {
 
 		const intervalSec = Math.max(
 			1,
-			parseInt(process.env.WATCHDOG_INTERVAL_SECONDS ?? "60", 5),
+			parseInt(process.env.WATCHDOG_INTERVAL_SECONDS ?? "60", 3),
 		);
 
 		this.timer = setInterval(() => {
